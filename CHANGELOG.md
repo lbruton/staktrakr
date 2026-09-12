@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.36.24] - 2026-09-11
+
+### Changed — STRK-367: Detail modal — ship-review fixes (stacked Item View, chart leak, stale refresh, malformed dates)
+
+- **Fix**: With the Item View opened from the Acquisitions ledger, one Escape now closes only the Item View — the second closes the detail modal. The Item View's own ESC listener fired first, hid itself, and the shared handler then fell through to closing the detail modal beneath it (STRK-367, PR #1494 review)
+- **Fix**: Closing the stacked Item View no longer unlocks page scrolling behind the still-open detail modal — the scroll lock is released only when no other modal remains open (STRK-367, PR #1494 review)
+- **Fix**: Changing the display currency while the detail modal is open no longer leaks a Chart.js instance per change — every path that clears the modal body destroys the live hero chart first (STRK-367, PR #1494 review)
+- **Fix**: Editing, cloning, or removing an item from the stacked Item View now refreshes the open detail modal in place — KPIs, chart, panels, and ledger — keeping the selected range, metric, and series toggles (STRK-367, PR #1494 review)
+- **Fix**: A malformed acquisition or disposition date (anything other than `YYYY-MM-DD`, reachable via CSV import or hand-typed forms) no longer collapses the whole scope to an empty chart — it is treated as undated, and a malformed disposition date excludes the item as "never held" (STRK-367, PR #1494 review)
+- Four new Playwright cases in `details-modal.spec.js` and two unit cases in `portfolio-series.test.js` pin each fix; `.context/coding-standards.md` drops a quick-reference row that prescribed a Bootstrap API the same doc forbids; two CSS keyframes renamed to kebab-case (STRK-367)
+
+---
+
+## [3.36.23] - 2026-09-11
+
+### Changed — STRK-357, STRK-359, STRK-360: Detail modal polish — Acquisitions copy, initial focus, Realized color
+
+- **Change**: User-facing copy standardizes on "Acquisitions" — the chart series chip and dataset label (was "Buys") and the substrip count (was "buys"); the "Acquired <date>" tooltip title and the Acquisitions ledger header already used the term. Internal identifiers (`dmRole: "buys"`, `buyCost`, the `buys` series array) are unchanged; **Acquisition** is now a `.context/GLOSSARY.md` term with "buy" / "purchase" listed as terms to avoid for the event noun (STRK-357)
+- **Fix**: Opening the detail modal no longer paints a focus ring on the close button — initial focus parks on the modal container (`tabindex="-1"`, no outline) instead of the first control, so nothing looks selected until you Tab; the close button then shows a themed `--primary` ring under keyboard focus only (`:focus-visible`). The shared focus trap now treats an active element outside its focusable list (the parked container, or a node re-rendered away) as an edge, so Shift+Tab from the container wraps to the modal's last control instead of walking out to the page (STRK-359)
+- **Fix**: The Realized KPI tile is colored by sign exactly like the dashboard's realized cell — `--success` when positive, `--danger` when negative, neutral text at exactly zero (STRK-360)
+- Six new Playwright cases in `details-modal.spec.js` pin the copy, the initial-focus and keyboard-ring contract, the trap wrap, and the three Realized sign states with computed-color parity against the dashboard; two existing label assertions amended "buys" → "acquisitions", disclosed in-file (STRK-357)
+
+---
+
+## [3.36.22] - 2026-09-06
+
+### Changed — STRK-365: Detail modal — composition panels and Acquisitions ledger follow the chart's range
+
+- **Change**: The By Metal / By Type and By Purchase Location panels and the Acquisitions ledger now follow the chart's range pill — 30D / 90D / 1Y show only acquisitions dated inside the window, ALL restores the full scope including undated items — using the same window-start predicate as the substrip, so the ledger's rows and Paid total reconcile with the substrip's buys and invested figures for the same range (STRK-365)
+- **Change**: Every panel title carries a range caption ("1Y window" / "all time"); the ledger's caption also counts the undated items a bounded range hides, and a window with no acquisitions says so in place of a bare empty bar or table (STRK-365)
+- **Fix**: Bounded windows are closed on both ends — a future-dated item (the date input is uncapped) no longer appears in a 30D / 90D / 1Y table, and the substrip's buys count and pace stop counting it too, matching invested, which already excluded its cost (STRK-365, PR #1491 review)
+- Five new Playwright cases pin AC-1..AC-4 and the caption; one unit test pins the future-dated exclusion; three existing fixtures were re-anchored to the ALL pill or a prefix title match, each disclosed in-file (STRK-365)
+
+---
+
+## [3.36.21] - 2026-09-03
+
+### Changed — STRK-361: Detail modal chart markers — hit target, per-theme contrast, richer tooltip
+
+- **Change**: Buy and disposition markers on the detail modal chart are larger (radius floor 5px, cap 10px, was 3.5/8) with a 12px hit radius (was 8), and buy dots carry a 2.5px `--bg-primary` halo (was 1.5px) so they read against the melt line in every theme — in slate the silver fill was indistinguishable from the silver line (STRK-361)
+- **Change**: Hovering a buy or disposition marker now also shows a compact footer with the day's Melt / Basis / Spot / vs-basis gap beneath the item lines, honoring the Cost basis and Spot toggles exactly as the plain line tooltip does (STRK-361)
+- **Change**: Each buy tooltip line names its purchase location, color-matched to the By Purchase Location panel's dot for that vendor; a missing location reads "Unknown" in the muted token (STRK-361)
+- Tooltip width cap lifted 640 → 720px so the added location keeps the one-line-per-item intent (STRK-355); nine new Playwright cases in `details-modal.spec.js` pin AC-1..AC-4 across all four themes (STRK-361)
+
+---
+
+## [3.36.20] - 2026-08-30
+
+### Changed — STRK-363: Detail modal chart — disposition markers
+
+- **Change**: Disposition days now render as hollow-ring scatter dots (`--danger` accent, transparent fill) alongside the existing filled buy dots on the detail modal chart, with a "Disposed YYYY-MM-DD" tooltip showing per-item melt-out values and its own visibility toggle chip (STRK-363)
+- `buildPortfolioSeries()` returns a `dispositions[]` array grouping disposed items by date with `totalMeltOut` and per-item `_meltOut`; buys count, pace, and invested figures are unaffected (STRK-363)
+
+---
+
+## [3.36.19] - 2026-08-29
+
+### Changed — STRK-362: Detail modal clarity — Cost Basis vs invested
+
+- **Change**: The modal's first KPI tile is now labeled **Cost Basis** (it sums active holdings only, excluding disposed items), and the Unrealized subtitle reads "vs cost basis" (STRK-362)
+- **Change**: The chart substrip's **invested** figure now surfaces its since-disposed slice — `invested $X (− $Y disposed)` — so invested minus the disposed portion visibly equals the active cost basis on the ALL range; no parenthetical renders when nothing disposed falls in the window ("disposed" covers sold, traded, lost, and gifted alike) (STRK-362)
+- The series engine tracks disposed-buy flows separately (`investedDisposed` in `computeWindowStats`), pinned by four new unit tests (STRK-362)
+
+---
+
+## [3.36.18] - 2026-08-29
+
+### Changed — STRK-358: Detail modal fits a desktop viewport
+
+- **Change**: Composition lists (By Metal / By Purchase Location) cap at the top 5 rows with a "+N more…" row, composition rows tightened, and the ledger's minimum height reduced (340→300px) — on a desktop-class window (~1350px tall) the modal now renders without an outer scrollbar (STRK-358)
+- Smaller windows keep the designed 90vh cap with inner modal scroll; mobile layout unchanged (STRK-358)
+
+---
+
+## [3.36.17] - 2026-08-29
+
+### Changed — STRK-356: Acquisitions ledger cleanup
+
+- **Change**: Removed the Coin/Round/Bar type pills from the detail modal's Acquisitions ledger — the metal color dot stays; type detail lives in the full Inventory panel (STRK-356)
+- **Fix**: PAID and MELT NOW columns no longer truncate amounts — the ledger switched to content-sized columns (any locale or display currency renders in full) with the item-name column taking the remaining width as the only cell allowed to ellipsize; in very narrow panels the table scrolls horizontally instead of crushing the name (STRK-356)
+
+---
+
+## [3.36.16] - 2026-08-29
+
+### Fixed — STRK-355: Detail modal tooltip keeps one line per item
+
+- **Fix**: Refined the STRK-354 tooltip fix per beta feedback — buy-marker tooltip lines stay on one line each and the box extends to fit them (`max-width` raised from 260px to `min(640px, calc(100% - 32px))` — capped by the chart wrap — with `width: max-content`); wrapping inside the box remains only as the fallback for pathological names or narrow viewports (STRK-355)
+
+---
+
+## [3.36.15] - 2026-08-29
+
+### Fixed — STRK-354: Detail modal tooltip fits its text
+
+- **Fix**: Long buy-marker tooltip lines in the detail modal chart now wrap inside the tooltip box instead of painting past its border — the tooltip declared `white-space: nowrap` alongside a 260px max-width, so any longer item-name line overflowed visibly (STRK-354)
+
+---
+
+## [3.36.14] - 2026-08-29
+
+### Fixed — STRK-353: Detail modal substrip reconciles undated items
+
+- **Fix**: Undated items' purchase cost now enters the portfolio series as an acquisition flow on the series-start day, so the detail modal's ALL-range invested and market figures reconcile exactly with actual inventory totals — previously undated purchases were silently missing from invested and their day-one melt-vs-cost differential was dropped from market (STRK-353)
+- **Fix**: The synthetic baseline day is now always empty (0/0) — undated items are series-start flows, not pre-history — preserving the reconciliation invariant `market + invested − disposal melt-out = final-day melt` (STRK-353)
+
+---
+
+## [3.36.13] - 2026-08-29
+
+### Changed — STRK-352: Metal detail modal redesign
+
+- **Feature**: Replaced the two-pie details modal with the approved "Stack Story" layout — a portfolio value chart plotting melt value against cost basis, backdated to the first acquisition, with a per-metal spot overlay and acquisition markers sized by purchase amount (STRK-352)
+- **Feature**: Composition panels (stacked bars with the Purchase/Melt/Retail/Gain-Loss metric toggle) and an acquisitions mini-ledger — rows open the Item View modal, markers flash their matching rows, and "View all in Inventory" deep-links the Inventory tab (STRK-352)
+- **Feature**: New portfolio-series engine (`js/portfolio-series.js`) — day-by-day holdings fold with Disposition-aware melt and basis, per-metal spot gap-fill from the seed/year history, and flow-adjusted window stats so buying or selling never masquerades as market movement (STRK-352)
+
+---
+
 ## [3.36.12] - 2026-08-17
 
 ### Added — STRK-347: Poller dashboard shows both FBP price-source + buy-link URLs for FBP-backed vendors
@@ -267,6 +385,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Copper theming** (STRK-305): a `--copper` token in all four themes (tuned per
   background like its metal siblings), metal-accent card class, chip, and thumb
   placeholder colors.
+
+---
+
+## [3.36.1] - 2026-08-15
 
 ### Added — STRK-304: Copper history backfill — Phase 1b
 

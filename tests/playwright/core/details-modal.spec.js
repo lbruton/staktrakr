@@ -1,0 +1,1692 @@
+// STRK-352 — Metal detail modal (Variant A "Stack Story") domain suite.
+// New product domain: nothing owned `showDetailsModal`/#detailsModal before
+// this redesign (zero prior coverage; valuation owns item-level math, not
+// modal UI). Responsive/mobile assertions live in mobile-and-layout.spec.js.
+//
+// Written RED in Cohort B against the legacy pie modal: these tests encode the
+// reconciled requirements (AC-1..AC-4, AC-9..AC-19, AC-21, AC-24), the layer-2
+// daily-close pin, the D-3 generation race, the D-16 footer, and the
+// active-display-currency rule. Structure/interaction assertions only — no
+// text-presence-only checks (STRK-123 lesson).
+//
+// DOM contract pinned here for the implementation (C.5/C.6):
+//   #dmHeroChart (canvas), #dmChartTooltip (external tooltip),
+//   .dm-topbar/.dm-header[data-accent]/.dm-substats/.dm-kpis/.dm-kpi,
+//   .dm-series-chip[data-series=basis|spot|buys], [data-range], [data-metric],
+//   .dm-substrip, .dm-panel/.dm-panel-title/.dm-comp-bar/.dm-comp-row/.dm-comp-more,
+//   .dm-ledger tbody tr[data-uuid], .dm-flash, .dm-ledger-note, .dm-foot, .dm-skel,
+//   Chart datasets order: [0]=melt, [1]=basis, [2]=spot (per-metal), [3]=buys.
+
+import { test, expect } from "../helpers/mocks/extended-test.js";
+import { suppressWhatsNewPopup } from "../helpers/seed.js";
+
+// ── date + fixture helpers (local calendar frame, matching todayStr()) ──────
+
+/** Local YYYY-MM-DD for today − n days (matches the app's local date frame). */
+const localDayKey = (minusDays = 0) => {
+  const d = new Date(Date.now() - minusDays * 86400000);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+/** UTC YYYY-MM-DD for today − n days (spotHistory timestamps are bare UTC). */
+const utcDayKey = (minusDays = 0) =>
+  new Date(Date.now() - minusDays * 86400000).toISOString().slice(0, 10);
+
+/**
+ * Builds one inventory item fixture with STRK-352 defaults, merging in overrides.
+ * @param {object} [overrides] - Fields to override on the base fixture item
+ * @returns {object} Inventory item fixture
+ */
+const mkItem = (overrides = {}) => ({
+  uuid: overrides.uuid ?? `strk352-${Math.random().toString(36).slice(2, 8)}`,
+  name: "Test Silver Round",
+  metal: "Silver",
+  composition: "Silver",
+  qty: 1,
+  type: "Round",
+  weight: 1,
+  weightUnit: "oz",
+  price: 10,
+  marketValue: 0,
+  purity: 1,
+  date: localDayKey(10),
+  purchaseLocation: "apmex.com",
+  storageLocation: "Safe",
+  notes: "",
+  serial: 1,
+  ...overrides,
+});
+
+// Canonical seed — active silver 5.1 oz / cost 135, one disposed silver,
+// gold + copper for All, disposed-only platinum, palladium empty forever.
+const SEED_ITEMS = [
+  mkItem({
+    uuid: "s1",
+    name: "Big Silver Bar",
+    weight: 2,
+    price: 50,
+    date: localDayKey(5),
+    purchaseLocation: "apmex.com",
+  }),
+  mkItem({
+    uuid: "s2",
+    name: "Maple Pair",
+    qty: 2,
+    weight: 1,
+    price: 30,
+    date: localDayKey(45),
+    purchaseLocation: "monumentmetals.com",
+  }),
+  mkItem({
+    uuid: "s3",
+    name: "Mystery Round",
+    weight: 1,
+    price: 20,
+    date: "",
+    purchaseLocation: "ebay.com",
+  }),
+  mkItem({
+    uuid: "s5",
+    name: "Tiny Bit",
+    weight: 0.1,
+    price: 5,
+    date: localDayKey(3),
+    purchaseLocation: "herobullion.com",
+  }),
+  mkItem({
+    uuid: "s4",
+    name: "Sold Eagle",
+    weight: 1,
+    price: 40,
+    date: localDayKey(40),
+    purchaseLocation: "sdbullion.com",
+    disposition: { type: "sold", date: localDayKey(8), amount: 70, realizedGainLoss: 30 },
+  }),
+  mkItem({
+    uuid: "g1",
+    name: "G5 Goldback",
+    metal: "Gold",
+    type: "Goldback",
+    weight: 5,
+    weightUnit: "gb",
+    price: 40,
+    date: localDayKey(20),
+    purchaseLocation: "goldback.com",
+  }),
+  mkItem({
+    uuid: "c1",
+    name: "Copper Morgan",
+    metal: "Copper",
+    weight: 1,
+    price: 5,
+    date: localDayKey(15),
+    purchaseLocation: "silvergoldbull.com",
+  }),
+  mkItem({
+    uuid: "p1",
+    name: "Platinum Maple",
+    metal: "Platinum",
+    weight: 1,
+    price: 100,
+    date: localDayKey(60),
+    purchaseLocation: "apmex.com",
+    disposition: { type: "sold", date: localDayKey(30), amount: 125, realizedGainLoss: 25 },
+  }),
+];
+
+// live spot (raw-string keys read by fetchSpotPrice via parseFloat)
+const SPOT_RAW = {
+  spotSilver: "10",
+  spotGold: "1000",
+  spotPlatinum: "900",
+  spotPalladium: "800",
+  spotCopper: "0.3",
+};
+
+// yesterday carries TWO live intraday samples — the daily close MUST be the
+// later one (layer-2 pin: latest live timestamp per day wins)
+const SPOT_HISTORY = [
+  {
+    spot: 11,
+    metal: "Silver",
+    source: "api",
+    provider: "test",
+    timestamp: `${utcDayKey(1)} 09:00:00`,
+  },
+  {
+    spot: 12,
+    metal: "Silver",
+    source: "api",
+    provider: "test",
+    timestamp: `${utcDayKey(1)} 15:00:00`,
+  },
+];
+
+/**
+ * Seeds localStorage with inventory, raw spot values, and spot history before
+ * the app boots, then suppresses the What's New popup.
+ * @param {import('@playwright/test').Page} page
+ * @param {object} [overrides] - Optional items/spotHistory/extraJson overrides
+ * @returns {Promise<void>}
+ */
+async function installSeed(page, overrides = {}) {
+  const payload = {
+    items: overrides.items ?? SEED_ITEMS,
+    spotRaw: SPOT_RAW,
+    spotHistory: overrides.spotHistory ?? SPOT_HISTORY,
+    extraJson: overrides.extraJson ?? {},
+  };
+  await page.addInitScript((data) => {
+    localStorage.setItem("metalInventory", JSON.stringify(data.items));
+    localStorage.setItem("metalSpotHistory", JSON.stringify(data.spotHistory));
+    Object.entries(data.spotRaw).forEach(([k, v]) => localStorage.setItem(k, v));
+    Object.entries(data.extraJson).forEach(([k, v]) => localStorage.setItem(k, JSON.stringify(v)));
+  }, payload);
+  await suppressWhatsNewPopup(page);
+}
+
+/**
+ * Navigates to the app root and waits for listener wiring to complete.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+async function bootApp(page) {
+  await page.goto("/index.html", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => window.appListenersReady === true);
+}
+
+/**
+ * Opens the detail modal for one metal scope from the dashboard totals row.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} metal - Metal scope label, e.g. "All" or "Silver"
+ * @returns {Promise<void>}
+ */
+async function openScope(page, metal) {
+  await page.click(`.total-title[data-metal="${metal}"]`);
+  await expect(page.locator("#detailsModal")).toBeVisible();
+}
+
+/**
+ * Waits for the two-phase open to finish rendering the chart.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+async function chartReady(page) {
+  await page.waitForFunction(() => {
+    const c = document.getElementById("dmHeroChart");
+    return !!(c && window.Chart && window.Chart.getChart(c));
+  });
+}
+
+/**
+ * Waits until chart element layout is stable before coordinate math.
+ * FIXTURE CORRECTION (C.6, disclosed): chartReady fires while the 300ms entry
+ * animation and the post-populate scrollbar resize are still settling; marker
+ * coords measured mid-settle drift ~15px by click time, silently missing the
+ * hit radius. Requires two consecutive identical readings 250ms apart.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<void>}
+ */
+async function chartSettled(page) {
+  await page.waitForFunction(
+    () => {
+      const c = document.getElementById("dmHeroChart");
+      const chart = c && window.Chart && window.Chart.getChart(c);
+      if (!chart) return false;
+      const meta = chart.getDatasetMeta(chart.data.datasets.length - 1);
+      const el = meta.data[meta.data.length - 1];
+      if (!el) return false;
+      const key = `${el.x.toFixed(2)}:${el.y.toFixed(2)}:${chart.width}`;
+      if (window.__dmStableKey === key) return true;
+      window.__dmStableKey = key;
+      return false;
+    },
+    undefined,
+    { polling: 250 }
+  );
+}
+
+/**
+ * Reads the on-canvas pixel coords of a buys-dataset marker (dataset index 3).
+ * Guards against a missing marker so a future seed change fails loudly here
+ * instead of as a TypeError inside page.evaluate (Codacy, PR #1480).
+ * @param {import('@playwright/test').Page} page
+ * @param {number} indexFromEnd - 0 = last marker (newest group), 1 = second-from-last, …
+ * @returns {Promise<{x: number, y: number}>}
+ */
+async function buysMarkerCoords(page, indexFromEnd) {
+  const coords = await page.evaluate((fromEnd) => {
+    const m = window.Chart.getChart(document.getElementById("dmHeroChart")).getDatasetMeta(3);
+    const el = m.data[m.data.length - 1 - fromEnd];
+    return el ? { x: el.x, y: el.y } : null;
+  }, indexFromEnd);
+  expect(coords).not.toBeNull();
+  return coords;
+}
+
+/**
+ * Stalls the day-map assembly so the skeleton phase is observable.
+ * FIXTURE CORRECTION (C.6, disclosed): the original stall lever routed
+ * **\/spot-history-*.json fetches, but the vendored spot bundle satisfies
+ * recent years without any network fetch, so the route never engaged and the
+ * body rendered instantly. Stalling window.getSpotDayMap — the real async
+ * seam the two-phase open awaits — keeps every assertion unchanged.
+ * @param {import('@playwright/test').Page} page
+ * @param {number} ms - Delay in milliseconds before the stalled call resolves
+ * @returns {Promise<void>}
+ */
+async function stallDayMaps(page, ms) {
+  await page.evaluate((delay) => {
+    const orig = window.getSpotDayMap;
+    window.getSpotDayMap = async (...args) => {
+      await new Promise((r) => setTimeout(r, delay));
+      return orig(...args);
+    };
+  }, ms);
+}
+
+// Chart introspection happens via inline page.evaluate callbacks — Playwright
+// serializes the callback function itself, so no dynamic code strings exist.
+
+// ── AC-1 / AC-2: shell + header ─────────────────────────────────────────────
+
+test("AC-1: opening a totals title renders the Variant A shell with zero legacy pie DOM", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "All");
+  const modal = page.locator("#detailsModal");
+  await expect(modal.locator(".dm-topbar .modal-close")).toBeVisible();
+  await expect(modal.locator(".dm-header")).toBeVisible();
+  await expect(modal.locator(".dm-kpis")).toBeVisible();
+  await expect(modal.locator("#dmHeroChart")).toBeVisible();
+  await expect(modal.locator(".dm-ledger")).toBeVisible();
+  await expect(modal.locator(".dm-foot")).toBeVisible();
+  // legacy pie layout must be gone
+  await expect(modal.locator("#typeChart")).toHaveCount(0);
+  await expect(modal.locator("#locationChart")).toHaveCount(0);
+  await expect(modal.locator(".details-grid")).toHaveCount(0);
+  await expect(modal.locator(".chart-canvas-container")).toHaveCount(0);
+});
+
+test("AC-2: header carries scope title, accent, and summed-unit substats", async ({ page }) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await expect(page.locator("#detailsModalTitle")).toHaveText("Silver — Detailed Breakdown");
+  await expect(page.locator("#detailsModal .dm-header")).toHaveAttribute("data-accent", "silver");
+  // active silver units: s1(1) + s2(2) + s3(1) + s5(1) = 5 (s4 disposed excluded)
+  await expect(page.locator("#detailsModal .dm-substats")).toContainText("5 items");
+  await expect(page.locator("#detailsModal .dm-substats")).toContainText("5.10 oz");
+});
+
+// ── AC-3: KPI strip ─────────────────────────────────────────────────────────
+
+test("AC-3: five KPI tiles; Unrealized matches the dashboard Gain figure; Realized always shown", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  const dashboardGain = (await page.locator("#lossProfitSilver").innerText()).trim();
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis).toHaveCount(5);
+  const labels = page.locator("#detailsModal .dm-kpi-label");
+  await expect(labels.nth(0)).toContainText(/cost basis/i);
+  await expect(labels.nth(1)).toContainText(/melt/i);
+  await expect(labels.nth(2)).toContainText(/retail/i);
+  await expect(labels.nth(3)).toContainText(/unrealized/i);
+  await expect(labels.nth(4)).toContainText(/realized/i);
+  // parity with the dashboard card (both derive from computeItemValuation)
+  const unrealized = (await kpis.nth(3).locator(".dm-kpi-value").innerText()).trim();
+  expect(dashboardGain).toContain(unrealized.replace(/[+−-]/g, "").trim());
+  // Realized renders unconditionally (s4 realizedGainLoss 30)
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toContainText("30");
+});
+
+// ── AC-4 + D-3: lifecycle ───────────────────────────────────────────────────
+
+test("AC-4: close destroys the chart; reopen renders cleanly with no console errors", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click("#detailsCloseBtn");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+  const destroyed = await page.evaluate(() => {
+    const c = document.getElementById("dmHeroChart");
+    return !c || !window.Chart.getChart(c);
+  });
+  expect(destroyed).toBe(true);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  expect(errors, `console errors: ${errors.join(" | ")}`).toHaveLength(0);
+});
+
+test("D-3: closing during a delayed load leaves no chart, DOM, or observer behind", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await stallDayMaps(page, 2500);
+  await openScope(page, "Silver");
+  await expect(page.locator("#detailsModal .dm-skel").first()).toBeVisible();
+  await page.click("#detailsCloseBtn");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+  // let the stalled promise resolve and the stale completion fire
+  await page.waitForTimeout(3200);
+  await expect(page.locator("#detailsModal")).toBeHidden();
+  const clean = await page.evaluate(() => {
+    const c = document.getElementById("dmHeroChart");
+    return !c || !window.Chart.getChart(c);
+  });
+  expect(clean).toBe(true);
+});
+
+test("AC-21: skeletons show while series data loads, then give way to the chart", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await stallDayMaps(page, 1200);
+  await openScope(page, "Silver");
+  await expect(page.locator("#detailsModal .dm-skel").first()).toBeVisible();
+  await chartReady(page);
+  await expect(page.locator("#detailsModal .dm-skel")).toHaveCount(0);
+});
+
+// ── AC-9 / AC-10 / AC-12: series chips ──────────────────────────────────────
+
+test("AC-9/AC-12: basis and buys chips default on, toggle their datasets, expose aria-pressed", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const basisChip = page.locator('#detailsModal .dm-series-chip[data-series="basis"]');
+  const buysChip = page.locator('#detailsModal .dm-series-chip[data-series="buys"]');
+  await expect(basisChip).toHaveAttribute("aria-pressed", "true");
+  await expect(buysChip).toHaveAttribute("aria-pressed", "true");
+  const basisVisible = () =>
+    page.evaluate(() =>
+      window.Chart.getChart(document.getElementById("dmHeroChart")).isDatasetVisible(1)
+    );
+  expect(await basisVisible()).toBe(true);
+  await basisChip.click();
+  await expect(basisChip).toHaveAttribute("aria-pressed", "false");
+  expect(await basisVisible()).toBe(false);
+});
+
+test("AC-10: single-metal scope renders the spot overlay on y1; All disables the chip and axis", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const spotChip = page.locator('#detailsModal .dm-series-chip[data-series="spot"]');
+  await expect(spotChip).toHaveAttribute("aria-pressed", "true");
+  expect(
+    await page.evaluate(
+      () => !!window.Chart.getChart(document.getElementById("dmHeroChart")).options.scales.y1
+    )
+  ).toBe(true);
+  await page.click("#detailsCloseBtn");
+  await openScope(page, "All");
+  await chartReady(page);
+  await expect(page.locator('#detailsModal .dm-series-chip[data-series="spot"]')).toBeDisabled();
+  expect(
+    await page.evaluate(() => {
+      const y1 = window.Chart.getChart(document.getElementById("dmHeroChart")).options.scales.y1;
+      return !y1 || y1.display === false;
+    })
+  ).toBe(true);
+});
+
+// ── AC-11: range pills ──────────────────────────────────────────────────────
+
+test("AC-11: 1Y is the default range; switching to 30D shrinks the window and re-renders", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await expect(page.locator('#detailsModal [data-range="1Y"]')).toHaveClass(/active/);
+  const seriesLen = () =>
+    page.evaluate(
+      () =>
+        window.Chart.getChart(document.getElementById("dmHeroChart")).data.datasets[0].data.length
+    );
+  const before = await seriesLen();
+  await page.click('#detailsModal [data-range="30D"]');
+  await expect(page.locator('#detailsModal [data-range="30D"]')).toHaveClass(/active/);
+  const after = await seriesLen();
+  expect(after).toBeLessThan(before);
+  expect(after).toBeGreaterThan(0);
+});
+
+// ── AC-13 / AC-14: tooltip, markers, ledger sync (real pointer events) ──────
+
+test("AC-13: hovering the plot shows the external tooltip; a real marker click flashes its ledger rows (AC-14)", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await page.mouse.move(box.x + box.width * 0.55, box.y + box.height * 0.5);
+  await expect(page.locator("#dmChartTooltip")).toBeVisible();
+  // real click on an active acquisition marker (ascending groups
+  // s2,s4,s1,s5 → second-from-last is s1's group, which is active)
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.click(box.x + marker.x, box.y + marker.y);
+  await expect(page.locator("#detailsModal .dm-ledger tr.dm-flash").first()).toBeVisible();
+});
+
+test("AC-14: a marker whose acquisitions are all disposed is a no-op (no flash, no error)", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  // Buys groups sort ascending by date: s2(45d), s4(40d), s1(5d), s5(3d) —
+  // third-from-last is s4's group, whose only acquisition is disposed
+  // (fixture note: originally targeted index 0, but s2 at 45d is older).
+  const marker = await buysMarkerCoords(page, 2);
+  await page.mouse.click(box.x + marker.x, box.y + marker.y);
+  await page.waitForTimeout(250);
+  await expect(page.locator("#detailsModal .dm-ledger tr.dm-flash")).toHaveCount(0);
+  expect(errors).toHaveLength(0);
+});
+
+/**
+ * Shared STRK-354/355 setup: seeds s1 with a name wider than the old 260px
+ * tooltip clamp, opens the Silver scope, and hovers s1's acquisition marker
+ * (AC-13 pattern) so the buy tooltip is showing. Assertions stay in the tests.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<import('@playwright/test').Locator>} The tooltip locator
+ */
+async function hoverLongNameBuyMarker(page) {
+  const items = SEED_ITEMS.map((it) =>
+    it.uuid === "s1"
+      ? { ...it, name: "SAMPLE - 1 oz Canadian Silver Maple Leaf Brilliant Uncirculated" }
+      : it
+  );
+  await installSeed(page, { items });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.move(box.x + marker.x - 2, box.y + marker.y);
+  await page.mouse.move(box.x + marker.x, box.y + marker.y);
+  return page.locator("#dmChartTooltip");
+}
+
+test("STRK-354: a long buy-tooltip line wraps inside the box — no bleed past the border", async ({
+  page,
+}) => {
+  const tip = await hoverLongNameBuyMarker(page);
+  await expect(tip).toBeVisible();
+  await expect(tip).toContainText("Canadian Silver Maple");
+  // the box must fit the text: no horizontal overflow past the padding box
+  const overflow = await tip.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
+test("STRK-355: a realistic long buy line stays on ONE line — the box extends to fit", async ({
+  page,
+}) => {
+  const tip = await hoverLongNameBuyMarker(page);
+  await expect(tip).toBeVisible();
+  await expect(tip).toContainText("Canadian Silver Maple");
+  // intent (STRK-355): the box extends past the old 260px clamp and the buy
+  // line renders unwrapped — one text line per item, box fits the text
+  const metrics = await tip.evaluate((el) => {
+    const line = [...el.children].find((c) => c.textContent.includes("Canadian Silver Maple"));
+    if (!line) throw new Error("STRK-355: buy line not found among tooltip children");
+    const lh = parseFloat(getComputedStyle(line).lineHeight);
+    if (!Number.isFinite(lh) || lh <= 0)
+      throw new Error(`STRK-355: non-numeric tooltip line-height: ${lh}`);
+    return {
+      boxWidth: el.clientWidth,
+      lines: Math.round(line.getBoundingClientRect().height / lh),
+    };
+  });
+  expect(metrics.boxWidth).toBeGreaterThan(300);
+  expect(metrics.lines).toBe(1);
+});
+
+// ── AC-15 display + layer-2 close + D-16 footer ─────────────────────────────
+
+test("STRK-362: invested shows its since-disposed slice in a parenthetical on ALL", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal [data-range="ALL"]');
+  // s4 (Sold Eagle, $40 buy, since disposed) is the only sold flow in the
+  // seed: invested − $40 = the active Cost Basis KPI
+  await expect(page.locator("#detailsModal .dm-substrip")).toContainText("(− $40.00 disposed)");
+});
+
+test("AC-15: substrip shows market, invested, buy count, and per-metal pace (no pace on All)", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const strip = page.locator("#detailsModal .dm-substrip");
+  await expect(strip).toContainText(/market/i);
+  await expect(strip).toContainText(/invested/i);
+  // STRK-357 (disclosed): label amended "buys" → "acquisitions" — copy-only spec change
+  await expect(strip).toContainText(/acquisitions/i);
+  await expect(strip).toContainText(/pace/i);
+  await page.click("#detailsCloseBtn");
+  await openScope(page, "All");
+  await chartReady(page);
+  await expect(page.locator("#detailsModal .dm-substrip")).not.toContainText(/pace/i);
+});
+
+test("layer-2 pin: the daily close is the LATEST live sample of the day", async ({ page }) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // yesterday had live samples 11 (09:00) and 12 (15:00) — close must be 12:
+  // active 5.1 oz × 12 = 61.2 at the second-to-last series point
+  const y = await page.evaluate(() => {
+    const d = window.Chart.getChart(document.getElementById("dmHeroChart")).data.datasets[0].data;
+    return d[d.length - 2].y;
+  });
+  expect(Math.abs(y - 61.2)).toBeLessThan(1e-6);
+});
+
+test("D-16: footer provenance renders the last-sync surface, no per-sample claims", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const foot = page.locator("#detailsModal .dm-foot");
+  await expect(foot).toContainText(/last sync/i);
+  await expect(foot).not.toContainText(/seed/i);
+});
+
+// ── AC-16 / AC-17: composition ──────────────────────────────────────────────
+
+test("STRK-358: composition lists cap at 5 rows with a +N more row", async ({ page }) => {
+  // desktop-class viewport (AC-2's fit target) — meaningless at 720p, where
+  // the 90vh cap + inner modal scroll is the designed behavior
+  await page.setViewportSize({ width: 1600, height: 1350 });
+  // three extra unique purchase locations → 9 distinct actives on All
+  const extra = [1, 2, 3].map((n) =>
+    mkItem({
+      uuid: `loc${n}`,
+      name: `Location Filler ${n}`,
+      purchaseLocation: `vendor${n}.example`,
+      date: localDayKey(n),
+    })
+  );
+  await installSeed(page, { items: [...SEED_ITEMS, ...extra] });
+  await bootApp(page);
+  await openScope(page, "All");
+  await chartReady(page);
+  // STRK-365: the ninth active (s3) is undated and only counts on ALL — the
+  // full-scope fit measured here is the same 9-row ledger STRK-358 sized for
+  await page.click('#detailsModal [data-range="ALL"]');
+  await chartSettled(page);
+  const locPanel = page.locator("#detailsModal .dm-panel", { hasText: "By Purchase Location" });
+  await expect(locPanel.locator(".dm-comp-row:not(.dm-comp-more)")).toHaveCount(5); // AC-1
+  await expect(locPanel.locator(".dm-comp-more")).toHaveText(/\+ 4 more…/); // 9 − 5
+  // AC-2: at a desktop-class window the modal carries no outer scroll
+  // (1px tolerance for integer rounding of scrollHeight/clientHeight)
+  const delta = await page
+    .locator("#detailsModal .modal-content")
+    .evaluate((el) => el.scrollHeight - el.clientHeight);
+  expect(delta).toBeLessThanOrEqual(1);
+});
+
+test("AC-16/AC-17: two panels, |metric| ranking with +N more, metric toggle re-renders signed Gain/Loss", async ({
+  page,
+}) => {
+  // FIXTURE CORRECTION (C.6, disclosed): the base seed carries only 6 ACTIVE
+  // purchase locations — the original "7" count included a disposed item's
+  // location, which AC-18 excludes from every active surface. Seed a 7th
+  // active-location item so the overflow row has something to overflow.
+  await installSeed(page, {
+    items: [
+      ...SEED_ITEMS,
+      mkItem({
+        uuid: "g2",
+        name: "Gold Buffalo",
+        metal: "Gold",
+        weight: 0.1,
+        price: 250,
+        date: localDayKey(12),
+        purchaseLocation: "jmbullion.com",
+      }),
+    ],
+  });
+  await bootApp(page);
+  await openScope(page, "All");
+  await chartReady(page);
+  const panels = page.locator("#detailsModal .dm-panel:has(.dm-comp-bar)");
+  await expect(panels).toHaveCount(2);
+  await expect(panels.nth(0).locator(".dm-panel-title")).toContainText(/by metal/i);
+  await expect(panels.nth(1).locator(".dm-panel-title")).toContainText(/location/i);
+  // 7 active purchase locations seeded → top 5 (STRK-358) + a "+N more" row
+  await expect(panels.nth(1).locator(".dm-comp-row:not(.dm-comp-more)")).toHaveCount(5);
+  await expect(panels.nth(1).locator(".dm-comp-more")).toContainText(/more/);
+  await expect(page.locator('#detailsModal [data-metric="melt"]')).toHaveClass(/active/);
+  await page.click('#detailsModal [data-metric="gainLoss"]');
+  await expect(page.locator('#detailsModal [data-metric="gainLoss"]')).toHaveClass(/active/);
+  await expect(
+    page.locator("#detailsModal .dm-comp-row .dm-neg, #detailsModal .dm-comp-row .dm-pos").first()
+  ).toBeVisible();
+});
+
+// ── AC-18 / AC-19: ledger ───────────────────────────────────────────────────
+
+test("STRK-356: ledger keeps metal dot + name, no type pill; amounts render in full", async ({
+  page,
+}) => {
+  // big-ticket amount that exceeded the old 80px Paid column width
+  const items = SEED_ITEMS.map((it) => (it.uuid === "s1" ? { ...it, price: 3450 } : it));
+  await installSeed(page, { items });
+  await bootApp(page);
+  await openScope(page, "All"); // All scope renders the metal dots
+  await chartReady(page);
+  await chartSettled(page); // measure layout only after the entry animation settles
+  const row = page.locator('#detailsModal .dm-ledger tr[data-uuid="s1"]');
+  await expect(row).toBeVisible();
+  await expect(row.locator(".dm-metal-dot")).toHaveCount(1); // dot stays (AC-1)
+  await expect(page.locator("#detailsModal .dm-type-chip")).toHaveCount(0); // pills gone (AC-1)
+  const paid = row.locator("td.dm-col-paid");
+  await expect(paid).toHaveText("$3,450.00"); // full formatted value (AC-2)
+  const paidClipped = await paid.evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(paidClipped).toBeLessThanOrEqual(1); // and it actually fits the cell (AC-2)
+  const meltClipped = await row
+    .locator("td.dm-col-melt")
+    .evaluate((el) => el.scrollWidth - el.clientWidth);
+  expect(meltClipped).toBeLessThanOrEqual(1);
+});
+
+test("AC-18: ledger lists active Items newest-first with undated last; disposed excluded", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // STRK-365: the ledger follows the chart range, and only ALL includes undated
+  // Items — the full-scope ordering contract is asserted on that pill
+  await page.click('#detailsModal [data-range="ALL"]');
+  const rows = page.locator("#detailsModal .dm-ledger tbody tr[data-uuid]");
+  await expect(rows).toHaveCount(4); // s5(3d), s1(5d), s2(45d), s3(undated) — s4 excluded
+  await expect(rows.nth(0)).toHaveAttribute("data-uuid", "s5");
+  await expect(rows.nth(1)).toHaveAttribute("data-uuid", "s1");
+  await expect(rows.nth(2)).toHaveAttribute("data-uuid", "s2");
+  await expect(rows.nth(3)).toHaveAttribute("data-uuid", "s3");
+  await expect(rows.nth(3)).toContainText("—"); // undated date cell
+});
+
+test("AC-19: ledger row click opens the Item View modal; View-all deep-links #/inventory", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]');
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await expect(page.locator("#viewItemModal")).toContainText("Big Silver Bar");
+  await page.click("#viewItemModal .view-modal-close");
+  await page.click("#detailsModal .dm-foot-inventory-link, #detailsModal .dm-link");
+  await expect(page).toHaveURL(/#\/inventory$/);
+  await expect(page.locator("#detailsModal")).toBeHidden();
+});
+
+// ── AC-21: empty and disposed-only states ───────────────────────────────────
+
+test("AC-21: a never-populated scope shows the empty state whose CTA runs the #newItemBtn path", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Palladium");
+  const empty = page.locator("#detailsModal .empty-state");
+  await expect(empty).toBeVisible();
+  await expect(empty).toContainText(/no palladium items yet/i);
+  await expect(page.locator("#detailsModal #dmHeroChart")).toHaveCount(0);
+  await empty.locator(".btn").click();
+  await expect(page.locator("#itemModal")).toBeVisible();
+});
+
+test("AC-21: the All scope with no Items at all uses the generic empty copy", async ({ page }) => {
+  await installSeed(page, { items: [], spotHistory: [] });
+  await bootApp(page);
+  await openScope(page, "All");
+  await expect(page.locator("#detailsModal .empty-state")).toContainText(/no items yet/i);
+});
+
+test("AC-21: a disposed-only scope renders history, zeroed holdings, nonzero Realized, and a ledger note", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Platinum");
+  await chartReady(page); // history renders — NOT the empty state
+  await expect(page.locator("#detailsModal .empty-state")).toHaveCount(0);
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(1).locator(".dm-kpi-value")).toContainText(/0[.,]00/); // melt 0
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toContainText("25"); // realized
+  await expect(page.locator("#detailsModal .dm-ledger tbody tr[data-uuid]")).toHaveCount(0);
+  await expect(page.locator("#detailsModal .dm-ledger-note")).toBeVisible();
+});
+
+// ── AC preamble: active display currency everywhere ─────────────────────────
+
+test("currency: every monetary surface renders via formatCurrency in the active display currency", async ({
+  page,
+}) => {
+  await installSeed(page, {
+    extraJson: { displayCurrency: "EUR", exchangeRates: { EUR: 2 } },
+  });
+  // FIXTURE CORRECTION (C.6, disclosed): boot runs fetchExchangeRates() against
+  // the live er-api endpoint; on success it OVERWRITES the seeded cache with
+  // real rates (EUR ≈ 0.92). Block the fetch so the seeded rate survives —
+  // core tests must not depend on live network anyway.
+  await page.route("**/open.er-api.com/**", (route) => route.abort());
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // KPI purchase: cost 135 USD × rate 2 → €270.00
+  await expect(page.locator("#detailsModal .dm-kpi").nth(0).locator(".dm-kpi-value")).toHaveText(
+    /€270\.00/
+  );
+  await expect(page.locator("#detailsModal .dm-substrip")).toContainText("€");
+  await expect(page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]')).toContainText(
+    /€100\.00/
+  ); // paid 50 × 2
+  await expect(page.locator("#detailsModal .dm-comp-row").first()).toContainText("€");
+  // chart axis ticks + tooltip amounts converted too
+  const tickHasEuro = await page.evaluate(() =>
+    window.Chart.getChart(document.getElementById("dmHeroChart")).scales.y.ticks.some((t) =>
+      String(t.label).includes("€")
+    )
+  );
+  expect(tickHasEuro).toBe(true);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await page.mouse.move(box.x + box.width * 0.52, box.y + box.height * 0.5);
+  await expect(page.locator("#dmChartTooltip")).toContainText("€");
+});
+
+// ── AC-24: keyboard + touch targets ─────────────────────────────────────────
+
+test("AC-24: ledger rows and chips are keyboard-operable with accessible states", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const row = page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]');
+  await expect(row).toHaveAttribute("role", "button");
+  await expect(row).toHaveAttribute("tabindex", "0");
+  await row.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await page.click("#viewItemModal .view-modal-close");
+  const basisChip = page.locator('#detailsModal .dm-series-chip[data-series="basis"]');
+  await basisChip.focus();
+  await page.keyboard.press("Space");
+  await expect(basisChip).toHaveAttribute("aria-pressed", "false");
+});
+
+// ── AC-2 regression: close button position (found in live use) ──────────────
+
+test("AC-2: the close button sits at the top-RIGHT of the modal", async ({ page }) => {
+  // Live-use regression: a `*/` inside the dm- section banner comment
+  // terminated it early and CSS error recovery ate the whole `.dm-topbar`
+  // flex rule — the close button fell to the LEFT, in-flow. Pin the position.
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const content = await page.locator("#detailsModal .modal-content").boundingBox();
+  const btn = await page.locator("#detailsCloseBtn").boundingBox();
+  expect(btn.x + btn.width / 2).toBeGreaterThan(content.x + content.width / 2);
+});
+
+// ── AC-22 regression: slate's hex accent tokens (found in live use) ─────────
+
+test("AC-22: slate theme renders the chart — hex accent tokens must not crash the gradient", async ({
+  page,
+}) => {
+  // slate is the ONLY theme defining metal accents as hex (#d1d5db …);
+  // resolveColor passes hex through untouched, so the gradient's channel
+  // extraction must handle hex, not just rgb(). Live-use regression: silver
+  // and palladium in slate crashed to the data-error note.
+  await installSeed(page);
+  await page.addInitScript(() => localStorage.setItem("appTheme", "slate")); // THEME_KEY stores raw
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await expect(page.locator("#detailsModal .dm-ledger-note")).toHaveCount(0);
+  await expect(page.locator("#dmHeroChart")).toBeVisible();
+  // the melt fill must resolve to a real gradient built from real channels
+  const fillKind = await page.evaluate(() => {
+    const chart = window.Chart.getChart(document.getElementById("dmHeroChart"));
+    const fill = chart.data.datasets[0].backgroundColor;
+    const resolved = typeof fill === "function" ? fill({ chart }) : fill;
+    return resolved && resolved.constructor && resolved.constructor.name;
+  });
+  expect(fillKind).toBe("CanvasGradient");
+});
+
+test("AC-24: interactive controls meet the 44px touch target on mobile viewports", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  for (const sel of [
+    "#detailsCloseBtn",
+    '#detailsModal [data-range="30D"]',
+    '#detailsModal .dm-ledger tbody tr[data-uuid="s1"]',
+  ]) {
+    const box = await page.locator(sel).boundingBox();
+    expect(box.height, `${sel} height`).toBeGreaterThanOrEqual(44);
+  }
+});
+
+// ── STRK-363: disposition markers ───────────────────────────────────────────
+
+/**
+ * Reads the detail-modal chart dataset carrying the given dmRole, along with
+ * the first rendered point's canvas coordinates — lets a test assert dataset
+ * shape and hover a marker without repeating the Chart.getChart lookup.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} role - dmRole to look up, e.g. "buys" or "dispositions".
+ * @returns {Promise<object|null>} Dataset facts, or null when no dataset
+ *   carries that role.
+ */
+async function dmDatasetByRole(page, role) {
+  return page.evaluate((r) => {
+    const chart = window.Chart.getChart(document.getElementById("dmHeroChart"));
+    const idx = chart.data.datasets.findIndex((d) => d.dmRole === r);
+    if (idx < 0) return null;
+    const ds = chart.data.datasets[idx];
+    const meta = chart.getDatasetMeta(idx);
+    const firstEl = meta.data[0];
+    return {
+      type: ds.type,
+      bg: ds.backgroundColor,
+      borderColor: ds.borderColor,
+      borderWidth: ds.borderWidth,
+      pointCount: ds.data.length,
+      hidden: ds.hidden,
+      visible: chart.isDatasetVisible(idx),
+      firstCoord: firstEl ? { x: firstEl.x, y: firstEl.y } : null,
+    };
+  }, role);
+}
+
+/**
+ * Reads the #dmSubstrip2 buys/pace/invested figures actually rendered in the
+ * DOM, alongside the underlying computeWindowStats() values the app used to
+ * produce them — ties visible text to real computed numbers instead of just
+ * checking dataset point counts (STRK-363 AC-3 / CodeRabbit PR #1485).
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<{dom: object, computed: object}>}
+ */
+async function dmSubstripStats(page) {
+  return page.evaluate(() => {
+    const stats = computeWindowStats(_dmSeries, _dmWindowStartKey());
+    const spans = [...document.querySelectorAll("#dmSubstrip2 span")];
+    const strongText = (label) =>
+      spans.find((s) => s.textContent.trim().startsWith(label))?.querySelector("strong")
+        ?.textContent ?? null;
+    const paceFormatted =
+      stats.paceOzPerMonth != null
+        ? `${stats.paceOzPerMonth.toFixed(stats.paceOzPerMonth < 0.1 ? 3 : 1)} oz/mo`
+        : null;
+    return {
+      dom: {
+        buys: strongText("acquisitions"),
+        investedBase: (strongText("invested") || "").split(" (")[0],
+        pace: strongText("pace"),
+      },
+      computed: {
+        buyCount: stats.buyCount,
+        investedFormatted: formatCurrency(stats.invested),
+        paceFormatted,
+      },
+    };
+  });
+}
+
+test("STRK-363 AC-1: disposition markers render as a distinct scatter dataset with danger accent", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const info = await dmDatasetByRole(page, "dispositions");
+  expect(info).not.toBeNull();
+  expect(info.type).toBe("scatter");
+  expect(info.bg).toBe("transparent");
+  // must resolve to the actual danger token, not merely be a truthy string —
+  // resolveColor passes #hex through verbatim (never digit-scrape channels),
+  // so compare against the app's own token resolution (STRK-363, PR #1485)
+  const dangerRGB = await page.evaluate(() => getThemeColorRGB("danger"));
+  expect(dangerRGB).toBeTruthy();
+  expect(info.borderColor).toBe(dangerRGB);
+  expect(info.borderWidth).toBe(2);
+  expect(info.pointCount).toBeGreaterThan(0);
+  expect(info.hidden).toBe(false);
+});
+
+test("STRK-363 AC-2: hovering a disposition marker shows Disposed tooltip with melt-out values", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const ds = await dmDatasetByRole(page, "dispositions");
+  expect(ds?.firstCoord).not.toBeNull();
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  await page.mouse.move(box.x + ds.firstCoord.x, box.y + ds.firstCoord.y);
+  await expect(page.locator("#dmChartTooltip")).toBeVisible();
+  await expect(page.locator("#dmChartTooltip .dm-tt-title")).toContainText("Disposed");
+  const tooltipText = await page.locator("#dmChartTooltip").textContent();
+  // the disposed item row (name + qty + formatted melt-out) actually present,
+  // not just a bare currency-symbol match (STRK-363 AC-2, CodeRabbit PR #1485)
+  const dispRow = await page.evaluate(() => {
+    const group = _dmSeries?.dispositions?.[0];
+    const it = group?.items?.[0];
+    if (!it) return null;
+    return `${it.name || "(unnamed)"} ×${Number(it.qty) || 1} — ${formatCurrency(it._meltOut || 0)}`;
+  });
+  expect(dispRow).not.toBeNull();
+  await expect(page.locator("#dmChartTooltip").filter({ hasText: dispRow })).toHaveCount(1);
+  expect(tooltipText).toMatch(/\$/);
+});
+
+test("STRK-363 AC-3: buys count, pace, and invested are unchanged by disposition presence", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const buys = await dmDatasetByRole(page, "buys");
+  const disps = await dmDatasetByRole(page, "dispositions");
+  // the actual VISIBLE buys/pace/invested figures in #dmSubstrip2, tied to the
+  // real computed stats — not just that the two dataset point counts differ
+  // (STRK-363 AC-3, CodeRabbit PR #1485)
+  const disposedStats = await dmSubstripStats(page);
+  const dmAssertSubstripMatchesComputed = (s) => {
+    expect(s.dom.buys).toBe(String(s.computed.buyCount));
+    expect(s.dom.investedBase).toBe(s.computed.investedFormatted);
+    expect(s.dom.pace).toBe(s.computed.paceFormatted);
+  };
+  dmAssertSubstripMatchesComputed(disposedStats);
+  // otherwise-identical seed with the Silver disposition removed: buys, pace,
+  // and invested must render identically, proving the substrip figures are
+  // unaffected by disposition presence
+  const activeItems = SEED_ITEMS.map((it) =>
+    it.uuid === "s4" ? { ...it, disposition: undefined } : it
+  );
+  await installSeed(page, { items: activeItems });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const activeStats = await dmSubstripStats(page);
+  dmAssertSubstripMatchesComputed(activeStats);
+  expect(activeStats.dom.buys).toBe(disposedStats.dom.buys);
+  expect(activeStats.dom.investedBase).toBe(disposedStats.dom.investedBase);
+  expect(activeStats.dom.pace).toBe(disposedStats.dom.pace);
+  expect(buys.pointCount).toBeGreaterThan(0);
+  expect(disps.pointCount).toBeGreaterThan(0);
+});
+
+test("STRK-363 AC-4: Dispositions toggle chip hides/shows the disposition markers", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const chip = page.locator('#detailsModal .dm-series-chip[data-series="dispositions"]');
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("aria-pressed", "true");
+  await chip.click();
+  await expect(chip).toHaveAttribute("aria-pressed", "false");
+  const ds = await dmDatasetByRole(page, "dispositions");
+  expect(ds.visible).toBe(false);
+});
+
+// ── STRK-361: marker hit target, per-theme halo contrast, richer marker tooltip ──
+
+/**
+ * Reads the buys scatter dataset's point styling alongside the melt line's
+ * border color so the halo contrast can be asserted against the app's own
+ * token resolution (never a hard-coded color).
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<object>} radii/hover/hit + colors for buys and melt
+ */
+async function dmBuysMarkerStyle(page) {
+  return page.evaluate(() => {
+    const chart = window.Chart.getChart(document.getElementById("dmHeroChart"));
+    const buys = chart.data.datasets.find((d) => d.dmRole === "buys");
+    const disps = chart.data.datasets.find((d) => d.dmRole === "dispositions");
+    const melt = chart.data.datasets.find((d) => d.dmRole === "melt");
+    const arr = (v) => (Array.isArray(v) ? v : [v]);
+    return {
+      radii: arr(buys.pointRadius),
+      hoverRadii: arr(buys.pointHoverRadius),
+      hitRadius: buys.pointHitRadius,
+      borderColor: buys.borderColor,
+      borderWidth: buys.borderWidth,
+      fills: arr(buys.backgroundColor),
+      dispRadii: arr(disps.pointRadius),
+      dispHitRadius: disps.pointHitRadius,
+      meltBorder: melt.borderColor,
+      bgPrimary: getThemeColorRGB("bg-primary"),
+    };
+  });
+}
+
+/**
+ * Computed CSS color of a probe element painted with `var(--token)` — the
+ * only reliable way to compare a DOM color against a theme token in tests
+ * (raw getPropertyValue returns the unresolved oklch()/hex source string).
+ * @param {import('@playwright/test').Page} page
+ * @param {string} token - Token name without the leading "--"
+ * @returns {Promise<string>} Resolved computed color
+ */
+async function dmTokenComputedColor(page, token) {
+  return page.evaluate((t) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(--${t})`;
+    document.body.appendChild(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  }, token);
+}
+
+test("STRK-361 AC-1: markers are comfortably large — radius floor ≥ 5, hit radius ≥ 12, hover grows", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const s = await dmBuysMarkerStyle(page);
+  expect(s.radii.length).toBeGreaterThan(0);
+  expect(Math.min(...s.radii)).toBeGreaterThanOrEqual(5);
+  expect(Math.max(...s.radii)).toBeLessThanOrEqual(10);
+  expect(s.hitRadius).toBeGreaterThanOrEqual(12);
+  s.radii.forEach((r, i) => expect(s.hoverRadii[i]).toBeGreaterThanOrEqual(r + 2));
+  expect(Math.min(...s.dispRadii)).toBeGreaterThanOrEqual(5);
+  expect(s.dispHitRadius).toBeGreaterThanOrEqual(12);
+});
+
+for (const theme of ["light", "dark", "slate", "sepia"]) {
+  test(`STRK-361 AC-2 (${theme}): buy markers carry a bg-primary halo ≥ 2.5px that differs from the melt line`, async ({
+    page,
+  }) => {
+    await installSeed(page);
+    await page.addInitScript((t) => localStorage.setItem("appTheme", t), theme);
+    await bootApp(page);
+    await openScope(page, "Silver");
+    await chartReady(page);
+    const s = await dmBuysMarkerStyle(page);
+    expect(s.bgPrimary).toBeTruthy();
+    // the halo is the contrast element: it resolves to the page background
+    // (never the accent), so it cuts the melt line on both sides of the dot
+    expect(s.borderColor).toBe(s.bgPrimary);
+    expect(s.borderColor).not.toBe(s.meltBorder);
+    expect(s.borderWidth).toBeGreaterThanOrEqual(2.5);
+    s.fills.forEach((f) => expect(f).not.toBe(s.borderColor));
+  });
+}
+
+test("STRK-361 AC-3: a buy-marker tooltip carries the day's Melt / Basis / Spot / gap footer, honoring the basis toggle", async ({
+  page,
+}) => {
+  const tip = await hoverLongNameBuyMarker(page);
+  await expect(tip).toBeVisible();
+  await expect(tip.locator(".dm-tt-title")).toContainText("Acquired");
+  const foot = tip.locator(".dm-tt-foot");
+  await expect(foot).toHaveCount(1);
+  // the footer values are the real series numbers for that day, not decoration
+  const expected = await page.evaluate(() => {
+    const group = _dmSeries.buys[_dmSeries.buys.length - 2];
+    const idx = _dmSeries.days.indexOf(group.day);
+    const gap = _dmSeries.melt[idx] - _dmSeries.basis[idx];
+    return {
+      melt: formatCurrency(_dmSeries.melt[idx]),
+      basis: formatCurrency(_dmSeries.basis[idx]),
+      gap: (gap > 0 ? "+" : gap < 0 ? "−" : "") + formatCurrency(Math.abs(gap)),
+    };
+  });
+  await expect(foot).toContainText(`Melt ${expected.melt}`);
+  await expect(foot).toContainText(`Basis ${expected.basis}`);
+  await expect(foot).toContainText(/Spot \S+\/oz/);
+  await expect(foot).toContainText(expected.gap);
+  // the footer is visually subordinate to the item lines
+  const smaller = await tip.evaluate((el) => {
+    const f = el.querySelector(".dm-tt-foot");
+    return parseFloat(getComputedStyle(f).fontSize) < parseFloat(getComputedStyle(el).fontSize);
+  });
+  expect(smaller).toBe(true);
+  // basis toggle off → the footer drops Basis but keeps Melt
+  await page.click('#detailsModal .dm-series-chip[data-series="basis"]');
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.move(box.x + marker.x - 2, box.y + marker.y);
+  await page.mouse.move(box.x + marker.x, box.y + marker.y);
+  await expect(tip).toBeVisible();
+  await expect(tip.locator(".dm-tt-foot")).toContainText("Melt");
+  await expect(tip.locator(".dm-tt-foot")).not.toContainText("Basis");
+});
+
+test("STRK-361 AC-3: a disposition-marker tooltip carries the same day-stats footer", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const ds = await dmDatasetByRole(page, "dispositions");
+  expect(ds?.firstCoord).not.toBeNull();
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  await page.mouse.move(box.x + ds.firstCoord.x - 2, box.y + ds.firstCoord.y);
+  await page.mouse.move(box.x + ds.firstCoord.x, box.y + ds.firstCoord.y);
+  const tip = page.locator("#dmChartTooltip");
+  await expect(tip).toBeVisible();
+  await expect(tip.locator(".dm-tt-title")).toContainText("Disposed");
+  const expectedMelt = await page.evaluate(() => {
+    const idx = _dmSeries.days.indexOf(_dmSeries.dispositions[0].day);
+    return formatCurrency(_dmSeries.melt[idx]);
+  });
+  await expect(tip.locator(".dm-tt-foot")).toContainText(`Melt ${expectedMelt}`);
+});
+
+test("STRK-361 AC-4: each buy tooltip line names its purchase location in the By Purchase Location panel's color", async ({
+  page,
+}) => {
+  const tip = await hoverLongNameBuyMarker(page);
+  await expect(tip).toBeVisible();
+  const loc = tip.locator(".dm-tt-loc").first();
+  await expect(loc).toHaveText("apmex.com");
+  const colors = await page.evaluate(() => {
+    const span = document.querySelector("#dmChartTooltip .dm-tt-loc");
+    // FIXTURE CORRECTION (STRK-365, disclosed): the title now carries the
+    // range caption, so match the title text by prefix, not equality
+    const row = [...document.querySelectorAll("#dmCompCol .dm-panel")]
+      .find((p) =>
+        p.querySelector(".dm-panel-title")?.textContent.startsWith("By Purchase Location")
+      )
+      ?.querySelectorAll(".dm-comp-row");
+    const match = [...(row || [])].find(
+      (r) => r.querySelector(".dm-comp-name")?.textContent === "apmex.com"
+    );
+    const dot = match?.querySelector(".dm-comp-dot");
+    return {
+      tooltip: getComputedStyle(span).color,
+      panel: dot ? getComputedStyle(dot).backgroundColor : null,
+    };
+  });
+  expect(colors.panel).not.toBeNull();
+  expect(colors.tooltip).toBe(colors.panel);
+});
+
+test("STRK-361 AC-4: an item with no purchase location reads Unknown in the neutral muted token", async ({
+  page,
+}) => {
+  const items = SEED_ITEMS.map((it) => (it.uuid === "s1" ? { ...it, purchaseLocation: "" } : it));
+  await installSeed(page, { items });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.move(box.x + marker.x - 2, box.y + marker.y);
+  await page.mouse.move(box.x + marker.x, box.y + marker.y);
+  const tip = page.locator("#dmChartTooltip");
+  await expect(tip).toBeVisible();
+  const loc = tip.locator(".dm-tt-loc").first();
+  await expect(loc).toHaveText("Unknown");
+  const spanColor = await loc.evaluate((el) => getComputedStyle(el).color);
+  expect(spanColor).toBe(await dmTokenComputedColor(page, "text-muted"));
+});
+
+// ── STRK-365: composition panels + ledger follow the chart's range ──────────
+// The substrip already reconciles to the range pill (STRK-353); the two
+// composition panels and the Acquisitions ledger must scope the same way —
+// dated acquisitions on/after the window start for 30D/90D/1Y, the full
+// scope including undated Items on ALL.
+
+test("STRK-365 AC-1: 1Y and 30D scope the ledger and panels to dated acquisitions in the window; ALL restores undated", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const rows = page.locator("#detailsModal .dm-ledger tbody tr[data-uuid]");
+  // 1Y default: s5(3d), s1(5d), s2(45d) — undated s3 is outside any bounded range
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(2)).toHaveAttribute("data-uuid", "s2");
+  await page.click('#detailsModal [data-range="30D"]');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toHaveAttribute("data-uuid", "s5");
+  await expect(rows.nth(1)).toHaveAttribute("data-uuid", "s1");
+  const locPanel = page.locator("#detailsModal .dm-panel", { hasText: "By Purchase Location" });
+  const locNames = locPanel.locator(".dm-comp-row:not(.dm-comp-more) .dm-comp-name");
+  // |melt| ranking: s1 (2 oz) ahead of s5 (0.1 oz)
+  await expect(locNames).toHaveText(["apmex.com", "herobullion.com"]);
+  await page.click('#detailsModal [data-range="ALL"]');
+  await expect(rows).toHaveCount(4);
+  await expect(rows.nth(3)).toHaveAttribute("data-uuid", "s3");
+  await expect(locNames).toHaveCount(4);
+});
+
+test("STRK-365 AC-2: on 30D the ledger's row count and Paid total reconcile with the substrip's buys and invested", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal [data-range="30D"]');
+  const strip = page.locator("#detailsModal .dm-substrip");
+  // STRK-357 (disclosed): label amended "buys" → "acquisitions"; the count contract is unchanged
+  await expect(strip).toContainText(/acquisitions\s*2(?!\d)/);
+  await expect(strip).toContainText("invested $55.00");
+  const rows = page.locator("#detailsModal .dm-ledger tbody tr[data-uuid]");
+  await expect(rows).toHaveCount(2);
+  const paidCells = await rows.locator("td.dm-col-paid").allTextContents();
+  const paidSum = paidCells.reduce((a, t) => a + Number(t.replace(/[^0-9.-]/g, "")), 0);
+  expect(paidSum).toBeCloseTo(55, 2);
+  // the By Type panel's Purchase metric sums the same two rows (both Rounds)
+  await page.click('#detailsModal [data-metric="purchase"]');
+  const typePanel = page.locator("#detailsModal .dm-panel", { hasText: "By Type" });
+  await expect(typePanel.locator(".dm-comp-row:not(.dm-comp-more) .dm-comp-val")).toHaveText([
+    "$55.00",
+  ]);
+});
+
+test("STRK-365 AC-3: every panel carries a scope caption that tracks the active range pill", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const caps = page.locator("#detailsModal .dm-panel .dm-panel-scope");
+  await expect(caps).toHaveCount(3);
+  for (let i = 0; i < 3; i++) {
+    await expect(caps.nth(i)).toHaveAttribute("data-scope-range", "1Y");
+    await expect(caps.nth(i)).toContainText("1Y");
+  }
+  await page.click('#detailsModal [data-range="30D"]');
+  for (let i = 0; i < 3; i++) {
+    await expect(caps.nth(i)).toHaveAttribute("data-scope-range", "30D");
+    await expect(caps.nth(i)).toContainText("30D");
+  }
+  await page.click('#detailsModal [data-range="ALL"]');
+  for (let i = 0; i < 3; i++) {
+    await expect(caps.nth(i)).toHaveAttribute("data-scope-range", "ALL");
+    await expect(caps.nth(i)).toContainText(/all time/i);
+  }
+});
+
+test("STRK-365 AC-4: after narrowing to 30D, a real marker click still flashes its ledger row", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal [data-range="30D"]');
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  // 30D buys groups ascending: s1(5d), s5(3d) — last is s5, which is active
+  const marker = await buysMarkerCoords(page, 0);
+  await page.mouse.click(box.x + marker.x, box.y + marker.y);
+  await expect(
+    page.locator('#detailsModal .dm-ledger tbody tr.dm-flash[data-uuid="s5"]')
+  ).toBeVisible();
+});
+
+test("STRK-365: the ledger caption says how many undated items a bounded range hides; ALL drops it", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // caption, not a .dm-ledger-note: the STRK-358 desktop fit has no spare line
+  const cap = page.locator("#detailsModal .dm-ledger-fill .dm-panel-scope");
+  await expect(cap).toContainText(/1 undated hidden/);
+  await expect(page.locator("#detailsModal .dm-ledger-note")).toHaveCount(0);
+  await page.click('#detailsModal [data-range="ALL"]');
+  await expect(cap).not.toContainText(/undated/);
+});
+
+// ── STRK-357 / STRK-359 / STRK-360: beta-feedback polish bundle ─────────────
+// Three low-priority follow-ups closing out the STRK-352 detail modal:
+// terminology (Acquisitions), initial focus on open, and Realized tile color.
+
+test("STRK-357 AC-1/AC-2: user-facing copy says Acquisitions on the chip and substrip; the tooltip title stays Acquired; dmRole stays buys", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // AC-2 pins the internal identifier: the chip is still keyed data-series="buys"
+  const chip = page.locator('#detailsModal .dm-series-chip[data-series="buys"]');
+  await expect(chip).toHaveText(/acquisitions/i);
+  await expect(chip).not.toHaveText(/buys/i);
+  const strip = page.locator("#detailsModal .dm-substrip");
+  await expect(strip).toContainText(/acquisitions\s*\d/);
+  await expect(strip).not.toContainText(/\bbuys\b/i);
+  // the Chart.js dataset label is user-facing copy too; its role key is not
+  const ds = await page.evaluate(() => {
+    const d = chartInstances.heroChart.data.datasets.find((x) => x.dmRole === "buys");
+    return { role: d.dmRole, label: d.label };
+  });
+  expect(ds).toEqual({ role: "buys", label: "Acquisitions" });
+  // "Acquired <day>" tooltip title is unchanged by the rename
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.move(box.x + marker.x - 2, box.y + marker.y);
+  await page.mouse.move(box.x + marker.x, box.y + marker.y);
+  await expect(page.locator("#dmChartTooltip .dm-tt-title")).toContainText(/^Acquired /);
+});
+
+test("STRK-359 AC-1/AC-2: opening parks focus on the modal container, not the close button; Tab reaches the close button with a themed focus ring", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const onOpen = await page.evaluate(() => {
+    const close = document.getElementById("detailsCloseBtn");
+    const content = document.querySelector("#detailsModal .modal-content");
+    return {
+      activeIsClose: document.activeElement === close,
+      activeIsContent: document.activeElement === content,
+      closeRing: close.matches(":focus-visible"),
+      contentOutline: getComputedStyle(content).outlineStyle,
+    };
+  });
+  // AC-1: no control is visually focused on open
+  expect(onOpen.activeIsClose).toBe(false);
+  expect(onOpen.closeRing).toBe(false);
+  expect(onOpen.activeIsContent).toBe(true);
+  expect(onOpen.contentOutline).toBe("none");
+  // AC-2: keyboard focus still shows an indicator, and it is the themed ring
+  await page.keyboard.press("Tab");
+  const closeBtn = page.locator("#detailsCloseBtn");
+  await expect(closeBtn).toBeFocused();
+  const tabbed = await closeBtn.evaluate((el) => ({
+    ring: el.matches(":focus-visible"),
+    outlineStyle: getComputedStyle(el).outlineStyle,
+    outlineColor: getComputedStyle(el).outlineColor,
+    primary: getComputedStyle(document.documentElement).getPropertyValue("--primary").trim(),
+  }));
+  expect(tabbed.ring).toBe(true);
+  expect(tabbed.outlineStyle).toBe("solid");
+  // resolve --primary through a scratch element so hex/oklch tokens compare as rgb
+  const primaryRgb = await page.evaluate((p) => {
+    const el = document.createElement("span");
+    el.style.color = p;
+    document.body.appendChild(el);
+    const c = getComputedStyle(el).color;
+    el.remove();
+    return c;
+  }, tabbed.primary);
+  expect(tabbed.outlineColor).toBe(primaryRgb);
+});
+
+test("STRK-359: Shift+Tab from the parked container wraps to the modal's last control — the focus trap still encloses the modal", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.keyboard.press("Shift+Tab");
+  const where = await page.evaluate(() => ({
+    inside: !!document.activeElement.closest("#detailsModal"),
+    isClose: document.activeElement.id === "detailsCloseBtn",
+    tag: document.activeElement.tagName,
+  }));
+  expect(where.inside).toBe(true);
+  expect(where.isClose).toBe(false);
+});
+
+/**
+ * Re-seeds s4 (the disposed silver Eagle) with a different realized figure so
+ * the Realized tile and the dashboard's realized cell can be compared by sign.
+ * @param {number} realizedGainLoss - Realized gain/loss to stamp on s4
+ * @returns {object[]} Items with s4 replaced
+ */
+const seedWithRealized = (realizedGainLoss) =>
+  SEED_ITEMS.map((it) =>
+    it.uuid === "s4"
+      ? {
+          ...it,
+          disposition: {
+            type: "sold",
+            date: localDayKey(8),
+            amount: 40 + realizedGainLoss,
+            realizedGainLoss,
+          },
+        }
+      : it
+  );
+
+/**
+ * Reads the Realized tile's classes and computed value color next to the
+ * dashboard's realized cell for the same metal.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<{tileClass: string, tileColor: string, dashColor: string, dashHasSpan: boolean}>}
+ */
+async function realizedParity(page) {
+  return page.evaluate(() => {
+    const tile = document.querySelectorAll("#detailsModal .dm-kpi")[4];
+    const value = tile.querySelector(".dm-kpi-value");
+    const dash = document.getElementById("realizedGainLossSilver");
+    const dashSpan = dash.querySelector("span");
+    return {
+      tileClass: tile.className,
+      tileColor: getComputedStyle(value).color,
+      dashColor: getComputedStyle(dashSpan || dash).color,
+      dashHasSpan: !!dashSpan,
+    };
+  });
+}
+
+test("STRK-360 AC-1: a positive Realized figure takes the gain class and the dashboard's realized color", async ({
+  page,
+}) => {
+  await installSeed(page); // canonical s4: realizedGainLoss 30
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4)).toHaveClass(/dm-kpi--gain/);
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--loss/);
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(true);
+  expect(p.tileColor).toBe(p.dashColor);
+});
+
+test("STRK-360 AC-1: a negative Realized figure takes the loss class and the dashboard's realized color", async ({
+  page,
+}) => {
+  await installSeed(page, { items: seedWithRealized(-15) });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4)).toHaveClass(/dm-kpi--loss/);
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--gain/);
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toContainText("15");
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(true);
+  expect(p.tileColor).toBe(p.dashColor);
+});
+
+test("STRK-360 AC-2: zero Realized renders neutral — no gain/loss class, matching the dashboard's plain $0.00", async ({
+  page,
+}) => {
+  await installSeed(page, { items: seedWithRealized(0) });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toHaveText("$0.00");
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--gain|dm-kpi--loss/);
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(false); // dashboard zero handling: bare text, no colored span
+  // neutral == the tile's default text token, same as the Cost Basis tile
+  const costBasisColor = await page
+    .locator("#detailsModal .dm-kpi")
+    .nth(0)
+    .locator(".dm-kpi-value")
+    .evaluate((el) => getComputedStyle(el).color);
+  expect(p.tileColor).toBe(costBasisColor);
+});
+
+// ── PR #1494 (dev→main ship review): stacked Item View + re-render hygiene ──
+// Copilot/Codex/CodeRabbit findings on the cumulative v3.36.13→23 diff. Each
+// case pins a bug that only shows with the Item View stacked on the details
+// modal, or with the modal re-rendering in place.
+
+test("ship #1494: Escape with the Item View stacked closes only the Item View — the details modal stays open", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]').click();
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#viewItemModal")).toBeHidden();
+  await expect(page.locator("#detailsModal")).toBeVisible();
+  // a second Escape now closes the details modal — one layer per keypress
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+});
+
+test("ship #1494: closing the stacked Item View keeps the page scroll locked while the details modal is still open", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]').click();
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await page.click("#viewItemModal .view-modal-close");
+  await expect(page.locator("#viewItemModal")).toBeHidden();
+  await expect(page.locator("#detailsModal")).toBeVisible();
+  expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
+  await page.click("#detailsCloseBtn");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+  expect(await page.evaluate(() => document.body.style.overflow)).toBe("");
+});
+
+test("ship #1494: a currency change while open replaces the hero chart in place — no leaked Chart instance", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const before = await page.evaluate(() => ({
+    count: Object.keys(Chart.instances).length,
+    id: chartInstances.heroChart.id,
+  }));
+  await page.evaluate(() => window.dispatchEvent(new Event("currencychange")));
+  await chartReady(page);
+  const after = await page.evaluate(() => ({
+    count: Object.keys(Chart.instances).length,
+    id: chartInstances.heroChart.id,
+    oldAlive: undefined,
+  }));
+  after.oldAlive = await page.evaluate((id) => !!Chart.instances[id], before.id);
+  expect(after.id).not.toBe(before.id); // a fresh instance on the fresh canvas
+  expect(after.oldAlive).toBe(false); // the previous one was destroyed, not orphaned
+  expect(after.count).toBe(before.count); // net zero — nothing leaked
+});
+
+test("ship #1494 (Codex): an inventory mutation while the details modal is open refreshes it in place, keeping the range pill", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal [data-range="30D"]');
+  await expect(page.locator('#detailsModal [data-range="30D"]')).toHaveClass(/active/);
+  const row = page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]');
+  await expect(row).toContainText("Big Silver Bar");
+  // the Item View's Edit / Clone / Remove actions all persist through
+  // saveInventory — drive that seam directly, then assert the visible modal
+  await page.evaluate(async () => {
+    const it = inventory.find((x) => x.uuid === "s1");
+    it.name = "Renamed Silver Bar";
+    await saveInventory();
+  });
+  await expect(row).toContainText("Renamed Silver Bar");
+  await expect(page.locator('#detailsModal [data-range="30D"]')).toHaveClass(/active/);
+  // a removal updates the header count and the ledger without a reopen
+  await page.evaluate(async () => {
+    const idx = inventory.findIndex((x) => x.uuid === "s5");
+    inventory.splice(idx, 1);
+    await saveInventory();
+  });
+  await expect(page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s5"]')).toHaveCount(0);
+  await expect(page.locator("#detailsModal .dm-substats")).toContainText("4 items");
+});
