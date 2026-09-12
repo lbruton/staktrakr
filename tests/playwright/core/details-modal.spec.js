@@ -599,7 +599,8 @@ test("AC-15: substrip shows market, invested, buy count, and per-metal pace (no 
   const strip = page.locator("#detailsModal .dm-substrip");
   await expect(strip).toContainText(/market/i);
   await expect(strip).toContainText(/invested/i);
-  await expect(strip).toContainText(/buys/i);
+  // STRK-357 (disclosed): label amended "buys" → "acquisitions" — copy-only spec change
+  await expect(strip).toContainText(/acquisitions/i);
   await expect(strip).toContainText(/pace/i);
   await page.click("#detailsCloseBtn");
   await openScope(page, "All");
@@ -976,7 +977,7 @@ async function dmSubstripStats(page) {
         : null;
     return {
       dom: {
-        buys: strongText("buys"),
+        buys: strongText("acquisitions"),
         investedBase: (strongText("invested") || "").split(" (")[0],
         pace: strongText("pace"),
       },
@@ -1335,7 +1336,8 @@ test("STRK-365 AC-2: on 30D the ledger's row count and Paid total reconcile with
   await chartReady(page);
   await page.click('#detailsModal [data-range="30D"]');
   const strip = page.locator("#detailsModal .dm-substrip");
-  await expect(strip).toContainText(/buys\s*2(?!\d)/);
+  // STRK-357 (disclosed): label amended "buys" → "acquisitions"; the count contract is unchanged
+  await expect(strip).toContainText(/acquisitions\s*2(?!\d)/);
   await expect(strip).toContainText("invested $55.00");
   const rows = page.locator("#detailsModal .dm-ledger tbody tr[data-uuid]");
   await expect(rows).toHaveCount(2);
@@ -1406,4 +1408,191 @@ test("STRK-365: the ledger caption says how many undated items a bounded range h
   await expect(page.locator("#detailsModal .dm-ledger-note")).toHaveCount(0);
   await page.click('#detailsModal [data-range="ALL"]');
   await expect(cap).not.toContainText(/undated/);
+});
+
+// ── STRK-357 / STRK-359 / STRK-360: beta-feedback polish bundle ─────────────
+// Three low-priority follow-ups closing out the STRK-352 detail modal:
+// terminology (Acquisitions), initial focus on open, and Realized tile color.
+
+test("STRK-357 AC-1/AC-2: user-facing copy says Acquisitions on the chip and substrip; the tooltip title stays Acquired; dmRole stays buys", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  // AC-2 pins the internal identifier: the chip is still keyed data-series="buys"
+  const chip = page.locator('#detailsModal .dm-series-chip[data-series="buys"]');
+  await expect(chip).toHaveText(/acquisitions/i);
+  await expect(chip).not.toHaveText(/buys/i);
+  const strip = page.locator("#detailsModal .dm-substrip");
+  await expect(strip).toContainText(/acquisitions\s*\d/);
+  await expect(strip).not.toContainText(/\bbuys\b/i);
+  // the Chart.js dataset label is user-facing copy too; its role key is not
+  const ds = await page.evaluate(() => {
+    const d = chartInstances.heroChart.data.datasets.find((x) => x.dmRole === "buys");
+    return { role: d.dmRole, label: d.label };
+  });
+  expect(ds).toEqual({ role: "buys", label: "Acquisitions" });
+  // "Acquired <day>" tooltip title is unchanged by the rename
+  await chartSettled(page);
+  const box = await page.locator("#dmHeroChart").boundingBox();
+  const marker = await buysMarkerCoords(page, 1);
+  await page.mouse.move(box.x + marker.x - 2, box.y + marker.y);
+  await page.mouse.move(box.x + marker.x, box.y + marker.y);
+  await expect(page.locator("#dmChartTooltip .dm-tt-title")).toContainText(/^Acquired /);
+});
+
+test("STRK-359 AC-1/AC-2: opening parks focus on the modal container, not the close button; Tab reaches the close button with a themed focus ring", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const onOpen = await page.evaluate(() => {
+    const close = document.getElementById("detailsCloseBtn");
+    const content = document.querySelector("#detailsModal .modal-content");
+    return {
+      activeIsClose: document.activeElement === close,
+      activeIsContent: document.activeElement === content,
+      closeRing: close.matches(":focus-visible"),
+      contentOutline: getComputedStyle(content).outlineStyle,
+    };
+  });
+  // AC-1: no control is visually focused on open
+  expect(onOpen.activeIsClose).toBe(false);
+  expect(onOpen.closeRing).toBe(false);
+  expect(onOpen.activeIsContent).toBe(true);
+  expect(onOpen.contentOutline).toBe("none");
+  // AC-2: keyboard focus still shows an indicator, and it is the themed ring
+  await page.keyboard.press("Tab");
+  const closeBtn = page.locator("#detailsCloseBtn");
+  await expect(closeBtn).toBeFocused();
+  const tabbed = await closeBtn.evaluate((el) => ({
+    ring: el.matches(":focus-visible"),
+    outlineStyle: getComputedStyle(el).outlineStyle,
+    outlineColor: getComputedStyle(el).outlineColor,
+    primary: getComputedStyle(document.documentElement).getPropertyValue("--primary").trim(),
+  }));
+  expect(tabbed.ring).toBe(true);
+  expect(tabbed.outlineStyle).toBe("solid");
+  // resolve --primary through a scratch element so hex/oklch tokens compare as rgb
+  const primaryRgb = await page.evaluate((p) => {
+    const el = document.createElement("span");
+    el.style.color = p;
+    document.body.appendChild(el);
+    const c = getComputedStyle(el).color;
+    el.remove();
+    return c;
+  }, tabbed.primary);
+  expect(tabbed.outlineColor).toBe(primaryRgb);
+});
+
+test("STRK-359: Shift+Tab from the parked container wraps to the modal's last control — the focus trap still encloses the modal", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.keyboard.press("Shift+Tab");
+  const where = await page.evaluate(() => ({
+    inside: !!document.activeElement.closest("#detailsModal"),
+    isClose: document.activeElement.id === "detailsCloseBtn",
+    tag: document.activeElement.tagName,
+  }));
+  expect(where.inside).toBe(true);
+  expect(where.isClose).toBe(false);
+});
+
+/**
+ * Re-seeds s4 (the disposed silver Eagle) with a different realized figure so
+ * the Realized tile and the dashboard's realized cell can be compared by sign.
+ * @param {number} realizedGainLoss - Realized gain/loss to stamp on s4
+ * @returns {object[]} Items with s4 replaced
+ */
+const seedWithRealized = (realizedGainLoss) =>
+  SEED_ITEMS.map((it) =>
+    it.uuid === "s4"
+      ? {
+          ...it,
+          disposition: {
+            type: "sold",
+            date: localDayKey(8),
+            amount: 40 + realizedGainLoss,
+            realizedGainLoss,
+          },
+        }
+      : it
+  );
+
+/**
+ * Reads the Realized tile's classes and computed value color next to the
+ * dashboard's realized cell for the same metal.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<{tileClass: string, tileColor: string, dashColor: string, dashHasSpan: boolean}>}
+ */
+async function realizedParity(page) {
+  return page.evaluate(() => {
+    const tile = document.querySelectorAll("#detailsModal .dm-kpi")[4];
+    const value = tile.querySelector(".dm-kpi-value");
+    const dash = document.getElementById("realizedGainLossSilver");
+    const dashSpan = dash.querySelector("span");
+    return {
+      tileClass: tile.className,
+      tileColor: getComputedStyle(value).color,
+      dashColor: getComputedStyle(dashSpan || dash).color,
+      dashHasSpan: !!dashSpan,
+    };
+  });
+}
+
+test("STRK-360 AC-1: a positive Realized figure takes the gain class and the dashboard's realized color", async ({
+  page,
+}) => {
+  await installSeed(page); // canonical s4: realizedGainLoss 30
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4)).toHaveClass(/dm-kpi--gain/);
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--loss/);
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(true);
+  expect(p.tileColor).toBe(p.dashColor);
+});
+
+test("STRK-360 AC-1: a negative Realized figure takes the loss class and the dashboard's realized color", async ({
+  page,
+}) => {
+  await installSeed(page, { items: seedWithRealized(-15) });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4)).toHaveClass(/dm-kpi--loss/);
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--gain/);
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toContainText("15");
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(true);
+  expect(p.tileColor).toBe(p.dashColor);
+});
+
+test("STRK-360 AC-2: zero Realized renders neutral — no gain/loss class, matching the dashboard's plain $0.00", async ({
+  page,
+}) => {
+  await installSeed(page, { items: seedWithRealized(0) });
+  await bootApp(page);
+  await openScope(page, "Silver");
+  const kpis = page.locator("#detailsModal .dm-kpi");
+  await expect(kpis.nth(4).locator(".dm-kpi-value")).toHaveText("$0.00");
+  await expect(kpis.nth(4)).not.toHaveClass(/dm-kpi--gain|dm-kpi--loss/);
+  const p = await realizedParity(page);
+  expect(p.dashHasSpan).toBe(false); // dashboard zero handling: bare text, no colored span
+  // neutral == the tile's default text token, same as the Cost Basis tile
+  const costBasisColor = await page
+    .locator("#detailsModal .dm-kpi")
+    .nth(0)
+    .locator(".dm-kpi-value")
+    .evaluate((el) => getComputedStyle(el).color);
+  expect(p.tileColor).toBe(costBasisColor);
 });

@@ -3238,7 +3238,8 @@
       aria-modal="true"
       aria-labelledby="detailsModalTitle"
     >
-      <div class="modal-content">
+      <!-- tabindex="-1": initial-focus target on open (STRK-359), never in the tab order -->
+      <div class="modal-content" tabindex="-1">
         <div class="dm-topbar">
           <button aria-label="Close modal" class="modal-close" id="detailsCloseBtn">×</button>
         </div>

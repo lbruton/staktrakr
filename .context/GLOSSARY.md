@@ -26,6 +26,10 @@ _Avoid_: label, category
 
 ## Disposition & Lifecycle
 
+**Acquisition**:
+The event of an Item entering inventory — the dated purchase the detail modal charts as a marker, counts in the substrip, and lists in the Acquisitions ledger. The neutral event noun for user-facing copy (STRK-357); "Acquired <date>" is its tooltip form.
+_Avoid_: buy, purchase (as the event noun — `buyCost`, `purchaseLocation`, and `dmRole: "buys"` are code identifiers, not copy)
+
 **Disposition**:
 The record of how an Item left active inventory — sold, traded, lost, or gifted. Tracks realized value and date.
 _Avoid_: disposal, removal, exit

@@ -123,6 +123,18 @@ const _dmItemOz = (item) => {
 const _dmSigned = (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + formatCurrency(Math.abs(v));
 
 /**
+ * KPI tile modifier class by sign — mirrors the dashboard's formatLossProfit
+ * contract (STRK-360): positive → gain, negative → loss, exactly zero → none.
+ * @param {number} v - Value in USD
+ * @returns {string} "dm-kpi--gain", "dm-kpi--loss", or ""
+ */
+const _dmSignClass = (v) => {
+  if (v > 0) return "dm-kpi--gain";
+  if (v < 0) return "dm-kpi--loss";
+  return "";
+};
+
+/**
  * Numeric [r, g, b] from a resolved theme color. resolveColor passes #hex
  * through untouched (slate defines its metal accents as hex), so channel
  * extraction must parse both rgb() and hex — digit-scraping a hex string
@@ -397,10 +409,12 @@ const _dmBuildKpis = (scope) => {
     { label: "Retail Value", value: formatCurrency(t.retail), sub: "est. replacement", cls: "" },
     { label: "Unrealized", value: _dmSigned(t.unrealized), sub: unrealSub, cls: gainCls },
     {
+      // STRK-360: sign-colored like the dashboard's realized cell
+      // (formatLossProfit: >0 success, <0 danger, exactly 0 plain)
       label: "Realized",
       value: formatCurrency(t.realized),
       sub: "from disposed items",
-      cls: "",
+      cls: _dmSignClass(t.realized),
     },
   ];
   tiles.forEach((tile) => {
@@ -831,7 +845,7 @@ const _dmRenderSubstrip = () => {
       ? `${formatCurrency(stats.invested)} (− ${formatCurrency(stats.investedDisposed)} disposed)`
       : formatCurrency(stats.invested);
   addStat("invested", investedText);
-  addStat("buys", String(stats.buyCount));
+  addStat("acquisitions", String(stats.buyCount)); // STRK-357: copy only; role stays "buys"
   if (stats.paceOzPerMonth != null) {
     const pace = stats.paceOzPerMonth;
     addStat("pace", `${pace.toFixed(pace < 0.1 ? 3 : 1)} oz/mo`);
@@ -1132,7 +1146,7 @@ const _dmRenderChart = () => {
   datasets.push({
     dmRole: "buys",
     type: "scatter",
-    label: "Buys",
+    label: "Acquisitions", // STRK-357: user-facing copy; dmRole stays "buys"
     data: windowBuys.map((b) => {
       const i = days.indexOf(b.day);
       return { x: i, y: _dmSeries.melt[i] };
@@ -1263,7 +1277,7 @@ const _dmRenderBody = () => {
       swatch: "dm-series-swatch--dash",
       disabled: _dmScope === "All",
     },
-    { key: "buys", label: "Buys", swatch: "dm-series-swatch--dot", disabled: false },
+    { key: "buys", label: "Acquisitions", swatch: "dm-series-swatch--dot", disabled: false },
     {
       key: "dispositions",
       label: "Dispositions",
@@ -1436,6 +1450,12 @@ const showDetailsModal = (metal) => {
   }
   const content = document.querySelector("#detailsModal .modal-content");
   if (content) content.scrollTop = 0;
+  // STRK-359: openModalById parks focus on the first control — the close
+  // button — so a focus ring paints the instant the modal opens. Park it on
+  // the container instead (tabindex="-1" in index.html keeps it out of the
+  // tab order): Tab still reaches the close button first, and its ring now
+  // shows only under keyboard focus via :focus-visible.
+  if (content && typeof content.focus === "function") content.focus({ preventScroll: true });
 
   if (_dmResizeObserver) {
     _dmResizeObserver.disconnect();
