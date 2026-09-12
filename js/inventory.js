@@ -196,6 +196,9 @@ const saveInventory = async () => {
   if (typeof clearLookupCache === "function") clearLookupCache();
   // STAK-149: Trigger debounced cloud auto-sync push (no-op if sync disabled or not connected)
   if (typeof scheduleSyncPush === "function") scheduleSyncPush();
+  // PR #1494 review: the details modal may be open beneath the Item View whose
+  // Edit / Clone / Remove just landed here — re-render it in place
+  if (typeof refreshDetailsModalIfOpen === "function") refreshDetailsModalIfOpen();
 };
 
 /**

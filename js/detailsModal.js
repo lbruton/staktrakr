@@ -300,12 +300,27 @@ const _dmRenderSkeletons = () => {
 };
 
 /**
+ * Destroy the live hero chart, if any. Its canvas lives inside #dmBody, so
+ * every path that clears the body must call this FIRST: a Chart instance
+ * whose canvas was detached keeps its listeners and can never be found again
+ * by Chart.getChart(canvas) — each currencychange re-render leaked one
+ * (PR #1494 review).
+ */
+const _dmDestroyHeroChart = () => {
+  if (chartInstances.heroChart) {
+    chartInstances.heroChart.destroy();
+    chartInstances.heroChart = null;
+  }
+};
+
+/**
  * Render the empty state (scope has zero active AND zero disposed Items).
  * @param {string} scope - "All" or metal display name
  */
 const _dmRenderEmpty = (scope) => {
   const body = _dmBody();
   if (!body) return;
+  _dmDestroyHeroChart();
   body.textContent = "";
   const wrap = document.createElement("div");
   wrap.className = "empty-state";
@@ -1257,6 +1272,7 @@ const _dmRenderChart = () => {
 const _dmRenderBody = () => {
   const body = _dmBody();
   if (!body) return;
+  _dmDestroyHeroChart(); // the canvas is about to be detached with the body
   body.textContent = "";
 
   body.appendChild(_dmBuildKpis(_dmScope));
@@ -1476,14 +1492,15 @@ const showDetailsModal = (metal) => {
  */
 const _dmLoadAndRender = async (scope, generation) => {
   try {
+    // psIsDayKey (js/portfolio-series.js): a malformed key is "undated" here
+    // exactly as it is inside the fold, so fromKey never slices a NaN year
     const usable = inventory.filter(
       (it) =>
         (scope === "All" || it?.metal === scope) &&
-        (!isDisposed(it) ||
-          (typeof it.disposition?.date === "string" && it.disposition.date !== ""))
+        (!isDisposed(it) || psIsDayKey(it.disposition?.date))
     );
     const metals = [...new Set(usable.map((it) => it.metal).filter(Boolean))];
-    const dated = usable.map((it) => it.date).filter((d) => typeof d === "string" && d !== "");
+    const dated = usable.map((it) => it.date).filter(psIsDayKey);
     const todayKey = todayStr();
     // fetch back past the series' own boundary (the fold re-derives exactly);
     // one extra year of map rows costs little and covers the 14-day pre-roll
@@ -1531,15 +1548,8 @@ const _dmLoadAndRender = async (scope, generation) => {
  * @param {string} message - Plain-text status line
  */
 const _dmShowLoadNote = (message) => {
-  // The hero chart's canvas (#dmHeroChart) lives inside #dmBody. Clearing the
-  // body below removes that canvas from the DOM, but a live Chart instance
-  // referenced by chartInstances.heroChart would then have no canvas for
-  // closeDetailsModal's Chart.getChart(canvas) lookup to find — destroy it
-  // here first so a render-phase failure can never strand a live Chart.
-  if (chartInstances.heroChart) {
-    chartInstances.heroChart.destroy();
-    chartInstances.heroChart = null;
-  }
+  // destroy first so a render-phase failure can never strand a live Chart
+  _dmDestroyHeroChart();
   const body = _dmBody();
   if (!body) return;
   body.textContent = "";
@@ -1558,12 +1568,12 @@ const closeDetailsModal = () => {
     _dmResizeObserver.disconnect();
     _dmResizeObserver = null;
   }
+  _dmDestroyHeroChart();
   const canvas = document.getElementById("dmHeroChart");
   if (canvas && typeof Chart !== "undefined") {
     const chart = Chart.getChart(canvas);
     if (chart) chart.destroy();
   }
-  chartInstances.heroChart = null;
   _dmSeries = null;
   _dmSpotMaps = null;
   if (window.closeModalById) {
@@ -1594,6 +1604,29 @@ window.addEventListener("currencychange", () => {
 });
 
 /**
+ * Re-render the open modal after an inventory mutation. The Item View stacks
+ * on top of it (STRK-352 ledger rows) and its Edit / Clone / Remove actions
+ * persist through saveInventory, which calls this — otherwise the KPIs, chart,
+ * panels, and ledger stay stale until a manual reopen (PR #1494 review).
+ * Keeps the scope, range pill, metric, and series toggles; the generation bump
+ * makes any in-flight load stale exactly as a reopen would.
+ */
+const refreshDetailsModalIfOpen = () => {
+  const modal = document.getElementById("detailsModal");
+  if (!modal || modal.style.display !== "flex") return;
+  const generation = ++_dmGeneration;
+  _dmRenderHeader(_dmScope);
+  const hasActive = _dmActiveItems(_dmScope).length > 0;
+  const hasDisposed = _dmDisposedItems(_dmScope).length > 0;
+  if (!hasActive && !hasDisposed) {
+    _dmSeries = null;
+    _dmRenderEmpty(_dmScope);
+    return;
+  }
+  _dmLoadAndRender(_dmScope, generation);
+};
+
+/**
  * Theme refresh hook — called by setTheme() via a guarded direct call (D-7):
  * canvas colors are resolved rgb values and must re-resolve after a theme
  * switch; the DOM side uses var() tokens and follows the cascade on its own.
@@ -1609,4 +1642,5 @@ window._refreshDetailsModalTheme = () => {
 
 // Expose details modal functions globally for inline handlers
 window.showDetailsModal = showDetailsModal;
+window.refreshDetailsModalIfOpen = refreshDetailsModalIfOpen;
 window.closeDetailsModal = closeDetailsModal;

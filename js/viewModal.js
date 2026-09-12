@@ -220,7 +220,13 @@ function closeViewModal() {
     if (typeof window.releaseFocus === "function") window.releaseFocus(modal);
     modal.style.display = "none";
   }
-  document.body.style.overflow = "";
+  // PR #1494 review: the Item View stacks on the details modal (STRK-352
+  // ledger rows). Release the page scroll lock only when no other modal is
+  // still open beneath, or the page scrolls behind the parent.
+  const anotherModalOpen = [...document.querySelectorAll(".modal")].some(
+    (m) => m !== modal && m.style.display === "flex"
+  );
+  if (!anotherModalOpen) document.body.style.overflow = "";
 
   // Destroy price history chart to free canvas resources
   if (_viewModalChartInstance) {
@@ -3041,6 +3047,11 @@ document.addEventListener("keydown", (e) => {
     const modal = document.getElementById("viewItemModal");
     if (modal && modal.style.display !== "none") {
       closeViewModal();
+      // PR #1494 review: this listener registers before events.js's shared
+      // ESC handler. Consume the keypress here, or that handler sees the Item
+      // View already hidden and falls through to closeDetailsModal() —
+      // dismissing both stacked layers on one Escape (STRK-352 ledger rows).
+      e.stopImmediatePropagation();
     }
   }
 });

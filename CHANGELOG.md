@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.36.24] - 2026-09-11
+
+### Changed — STRK-367: Detail modal — ship-review fixes (stacked Item View, chart leak, stale refresh, malformed dates)
+
+- **Fix**: With the Item View opened from the Acquisitions ledger, one Escape now closes only the Item View — the second closes the detail modal. The Item View's own ESC listener fired first, hid itself, and the shared handler then fell through to closing the detail modal beneath it (STRK-367, PR #1494 review)
+- **Fix**: Closing the stacked Item View no longer unlocks page scrolling behind the still-open detail modal — the scroll lock is released only when no other modal remains open (STRK-367, PR #1494 review)
+- **Fix**: Changing the display currency while the detail modal is open no longer leaks a Chart.js instance per change — every path that clears the modal body destroys the live hero chart first (STRK-367, PR #1494 review)
+- **Fix**: Editing, cloning, or removing an item from the stacked Item View now refreshes the open detail modal in place — KPIs, chart, panels, and ledger — keeping the selected range, metric, and series toggles (STRK-367, PR #1494 review)
+- **Fix**: A malformed acquisition or disposition date (anything other than `YYYY-MM-DD`, reachable via CSV import or hand-typed forms) no longer collapses the whole scope to an empty chart — it is treated as undated, and a malformed disposition date excludes the item as "never held" (STRK-367, PR #1494 review)
+- Four new Playwright cases in `details-modal.spec.js` and two unit cases in `portfolio-series.test.js` pin each fix; `.context/coding-standards.md` drops a quick-reference row that prescribed a Bootstrap API the same doc forbids; two CSS keyframes renamed to kebab-case (STRK-367)
+
+---
+
 ## [3.36.23] - 2026-09-11
 
 ### Changed — STRK-357, STRK-359, STRK-360: Detail modal polish — Acquisitions copy, initial focus, Realized color

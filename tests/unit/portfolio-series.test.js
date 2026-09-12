@@ -801,3 +801,40 @@ describe("pickLedgerRows", () => {
     );
   });
 });
+
+// ── PR #1494 review — malformed day keys never poison the fold ──────────────
+// Raw CSV disposition dates and form values can reach persistence without a
+// strict YYYY-MM-DD check. A malformed acquisition date sorts below every
+// real key (string compare), becomes startKey, and `_psAddDays(NaN)` yields a
+// zero-length day loop — the whole scope renders empty. Malformed keys are
+// treated as undated instead.
+
+describe("PR #1494 review — malformed day keys", () => {
+  it("a malformed acquisition date is treated as undated — the series still spans the real keys", () => {
+    const items = [
+      mkItem({ uuid: "ok", date: "2024-03-01", weight: 1 }),
+      mkItem({ uuid: "bad", date: "01/05/2024", weight: 2 }),
+    ];
+    const s = build(items, { Silver: flatSilver(10) });
+    assert.equal(s.days[0], "2024-02-16"); // anchored on the one real key
+    assert.equal(s.days[s.days.length - 1], TODAY);
+    // the malformed item still counts — as an undated (day-zero) holding
+    assert.equal(s.melt[s.melt.length - 1], 30); // (1 + 2) oz × $10
+  });
+
+  it("a malformed disposition date means 'never held' — excluded like an undated Disposition", () => {
+    const items = [
+      mkItem({ uuid: "ok", date: "2024-03-01", weight: 1 }),
+      mkItem({
+        uuid: "bad",
+        date: "2024-03-02",
+        weight: 5,
+        disposition: { type: "sold", date: "March 5", amount: 60 },
+      }),
+    ];
+    const s = build(items, { Silver: flatSilver(10) });
+    assert.ok(s.days.length > 0);
+    assert.equal(s.melt[s.melt.length - 1], 10); // only the well-formed item
+    assert.ok(s.days.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)));
+  });
+});
