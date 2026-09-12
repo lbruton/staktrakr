@@ -8046,7 +8046,7 @@ a.about-badge:hover {
 .dm-series-swatch {
   width: 14px;
   height: 0;
-  border-top: 3px solid currentColor;
+  border-top: 3px solid currentcolor;
   border-radius: 2px;
 }
 .dm-series-swatch--dash {
@@ -8057,7 +8057,7 @@ a.about-badge:hover {
   height: 8px;
   border: none;
   border-radius: 50%;
-  background: currentColor;
+  background: currentcolor;
 }
 .dm-series-swatch--ring {
   width: 8px;
@@ -8382,7 +8382,7 @@ table.dm-ledger {
   font-size: var(--font-size-sm);
   text-align: center;
 }
-@keyframes dmFlash {
+@keyframes dm-flash {
   0% {
     background: color-mix(in oklch, var(--primary), transparent 55%);
   }
@@ -8391,7 +8391,7 @@ table.dm-ledger {
   }
 }
 .dm-flash {
-  animation: dmFlash 1.6s ease-out;
+  animation: dm-flash 1.6s ease-out;
 }
 
 /* 7 ── Footer + links */
@@ -8430,9 +8430,9 @@ table.dm-ledger {
     var(--bg-tertiary) 60%
   );
   background-size: 200% 100%;
-  animation: dmShimmer 1.4s infinite linear;
+  animation: dm-shimmer 1.4s infinite linear;
 }
-@keyframes dmShimmer {
+@keyframes dm-shimmer {
   to {
     background-position: -200% 0;
   }

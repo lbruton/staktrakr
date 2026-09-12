@@ -1596,3 +1596,97 @@ test("STRK-360 AC-2: zero Realized renders neutral — no gain/loss class, match
     .evaluate((el) => getComputedStyle(el).color);
   expect(p.tileColor).toBe(costBasisColor);
 });
+
+// ── PR #1494 (dev→main ship review): stacked Item View + re-render hygiene ──
+// Copilot/Codex/CodeRabbit findings on the cumulative v3.36.13→23 diff. Each
+// case pins a bug that only shows with the Item View stacked on the details
+// modal, or with the modal re-rendering in place.
+
+test("ship #1494: Escape with the Item View stacked closes only the Item View — the details modal stays open", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]').click();
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#viewItemModal")).toBeHidden();
+  await expect(page.locator("#detailsModal")).toBeVisible();
+  // a second Escape now closes the details modal — one layer per keypress
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+});
+
+test("ship #1494: closing the stacked Item View keeps the page scroll locked while the details modal is still open", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]').click();
+  await expect(page.locator("#viewItemModal")).toBeVisible();
+  await page.click("#viewItemModal .view-modal-close");
+  await expect(page.locator("#viewItemModal")).toBeHidden();
+  await expect(page.locator("#detailsModal")).toBeVisible();
+  expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
+  await page.click("#detailsCloseBtn");
+  await expect(page.locator("#detailsModal")).toBeHidden();
+  expect(await page.evaluate(() => document.body.style.overflow)).toBe("");
+});
+
+test("ship #1494: a currency change while open replaces the hero chart in place — no leaked Chart instance", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  const before = await page.evaluate(() => ({
+    count: Object.keys(Chart.instances).length,
+    id: chartInstances.heroChart.id,
+  }));
+  await page.evaluate(() => window.dispatchEvent(new Event("currencychange")));
+  await chartReady(page);
+  const after = await page.evaluate(() => ({
+    count: Object.keys(Chart.instances).length,
+    id: chartInstances.heroChart.id,
+    oldAlive: undefined,
+  }));
+  after.oldAlive = await page.evaluate((id) => !!Chart.instances[id], before.id);
+  expect(after.id).not.toBe(before.id); // a fresh instance on the fresh canvas
+  expect(after.oldAlive).toBe(false); // the previous one was destroyed, not orphaned
+  expect(after.count).toBe(before.count); // net zero — nothing leaked
+});
+
+test("ship #1494 (Codex): an inventory mutation while the details modal is open refreshes it in place, keeping the range pill", async ({
+  page,
+}) => {
+  await installSeed(page);
+  await bootApp(page);
+  await openScope(page, "Silver");
+  await chartReady(page);
+  await page.click('#detailsModal [data-range="30D"]');
+  await expect(page.locator('#detailsModal [data-range="30D"]')).toHaveClass(/active/);
+  const row = page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s1"]');
+  await expect(row).toContainText("Big Silver Bar");
+  // the Item View's Edit / Clone / Remove actions all persist through
+  // saveInventory — drive that seam directly, then assert the visible modal
+  await page.evaluate(async () => {
+    const it = inventory.find((x) => x.uuid === "s1");
+    it.name = "Renamed Silver Bar";
+    await saveInventory();
+  });
+  await expect(row).toContainText("Renamed Silver Bar");
+  await expect(page.locator('#detailsModal [data-range="30D"]')).toHaveClass(/active/);
+  // a removal updates the header count and the ledger without a reopen
+  await page.evaluate(async () => {
+    const idx = inventory.findIndex((x) => x.uuid === "s5");
+    inventory.splice(idx, 1);
+    await saveInventory();
+  });
+  await expect(page.locator('#detailsModal .dm-ledger tbody tr[data-uuid="s5"]')).toHaveCount(0);
+  await expect(page.locator("#detailsModal .dm-substats")).toContainText("4 items");
+});

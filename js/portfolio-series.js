@@ -21,6 +21,19 @@
 
 const _PS_MS_PER_DAY = 86400000;
 
+/** Strict "YYYY-MM-DD" day key — anything else is treated as undated. */
+const _PS_DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True for a well-formed "YYYY-MM-DD" day key. Raw CSV and form values can
+ * reach persistence unvalidated; a malformed key sorts below every real one
+ * (string compare), becomes startKey, and poisons the day loop with NaN so
+ * the whole scope renders empty (PR #1494 review).
+ * @param {*} key - Candidate day key
+ * @returns {boolean} Whether it is a strict day key
+ */
+const psIsDayKey = (key) => typeof key === "string" && _PS_DAY_KEY_RE.test(key);
+
 /**
  * Convert a "YYYY-MM-DD" day key to a UTC epoch-day number.
  * @param {string} key - Day key
@@ -140,11 +153,11 @@ const buildPortfolioSeries = (items, spotDayMaps, scope, todaySpotPrices, todayK
   // AC-7: an undated Disposition means "never held" — excluded entirely
   const usable = scoped.filter((it) => {
     if (!h.isDisposed(it)) return true;
-    return typeof it.disposition?.date === "string" && it.disposition.date !== "";
+    return psIsDayKey(it.disposition?.date);
   });
   if (usable.length === 0) return empty;
 
-  const datedKeys = usable.map((it) => it.date).filter((d) => typeof d === "string" && d !== "");
+  const datedKeys = usable.map((it) => it.date).filter(psIsDayKey);
   const startKey =
     datedKeys.length > 0
       ? _psAddDays(
@@ -195,7 +208,7 @@ const buildPortfolioSeries = (items, spotDayMaps, scope, todaySpotPrices, todayK
       meltFactor = oz * (parseFloat(it.purity) || 1);
     }
     const cost = (parseFloat(it.price) || 0) * qty;
-    const dated = typeof it.date === "string" && it.date !== "";
+    const dated = psIsDayKey(it.date);
     const acqIdx = dated ? _psKeyToEpochDays(it.date) - startNum : 0;
     const disposed = h.isDisposed(it);
     const dispIdx = disposed ? _psKeyToEpochDays(it.disposition.date) - startNum : Infinity;
@@ -386,6 +399,7 @@ if (typeof window !== "undefined") {
   window.buildPortfolioSeries = buildPortfolioSeries;
   window.computeWindowStats = computeWindowStats;
   window.pickLedgerRows = pickLedgerRows;
+  window.psIsDayKey = psIsDayKey;
 }
 
 // Node export for unit tests (mirrors js/utils.js pattern)
