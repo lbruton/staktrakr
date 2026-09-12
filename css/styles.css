@@ -7894,6 +7894,16 @@ a.about-badge:hover {
 .dm-topbar .modal-close {
   position: static;
 }
+/* STRK-359: initial focus parks on the container (tabindex="-1") — no ring
+   there; the close button keeps a themed ring under KEYBOARD focus only */
+#detailsModal .modal-content:focus {
+  outline: none;
+}
+.dm-topbar .modal-close:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+  color: var(--text-primary);
+}
 .dm-header {
   display: flex;
   align-items: baseline;

@@ -1293,16 +1293,18 @@ const trapFocus = (modal) => {
     }
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
+    // activeElement can sit OUTSIDE the list — a parked tabindex="-1"
+    // container (STRK-359) or a node the modal re-rendered away. Treat that
+    // as an edge too, or a native Tab/Shift+Tab walks out of the modal.
+    const idx = focusable.indexOf(document.activeElement);
     if (e.shiftKey) {
-      if (document.activeElement === first) {
+      if (idx <= 0) {
         e.preventDefault();
         last.focus();
       }
-    } else {
-      if (document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
+    } else if (idx === -1 || idx === focusable.length - 1) {
+      e.preventDefault();
+      first.focus();
     }
   };
 

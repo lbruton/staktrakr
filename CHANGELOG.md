@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.36.23] - 2026-09-11
+
+### Changed — STRK-357, STRK-359, STRK-360: Detail modal polish — Acquisitions copy, initial focus, Realized color
+
+- **Change**: User-facing copy standardizes on "Acquisitions" — the chart series chip and dataset label (was "Buys") and the substrip count (was "buys"); the "Acquired <date>" tooltip title and the Acquisitions ledger header already used the term. Internal identifiers (`dmRole: "buys"`, `buyCost`, the `buys` series array) are unchanged; **Acquisition** is now a `.context/GLOSSARY.md` term with "buy" / "purchase" listed as terms to avoid for the event noun (STRK-357)
+- **Fix**: Opening the detail modal no longer paints a focus ring on the close button — initial focus parks on the modal container (`tabindex="-1"`, no outline) instead of the first control, so nothing looks selected until you Tab; the close button then shows a themed `--primary` ring under keyboard focus only (`:focus-visible`). The shared focus trap now treats an active element outside its focusable list (the parked container, or a node re-rendered away) as an edge, so Shift+Tab from the container wraps to the modal's last control instead of walking out to the page (STRK-359)
+- **Fix**: The Realized KPI tile is colored by sign exactly like the dashboard's realized cell — `--success` when positive, `--danger` when negative, neutral text at exactly zero (STRK-360)
+- Six new Playwright cases in `details-modal.spec.js` pin the copy, the initial-focus and keyboard-ring contract, the trap wrap, and the three Realized sign states with computed-color parity against the dashboard; two existing label assertions amended "buys" → "acquisitions", disclosed in-file (STRK-357)
+
+---
+
 ## [3.36.22] - 2026-09-06
 
 ### Changed — STRK-365: Detail modal — composition panels and Acquisitions ledger follow the chart's range
